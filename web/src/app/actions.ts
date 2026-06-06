@@ -1,7 +1,18 @@
 "use server";
 
 import { Pool } from 'pg';
-import { getExcelData, TareaParsed } from '@/lib/excelParser';
+import type { TareaParsed } from '@/lib/excelParser';
+
+// Lazy-load del parser Excel solo cuando se necesite (evita importar `fs` en producción)
+async function loadExcelData(): Promise<TareaParsed[]> {
+  try {
+    const { getExcelData } = await import('@/lib/excelParser');
+    return getExcelData();
+  } catch (e) {
+    console.warn("Excel fallback no disponible:", e);
+    return [];
+  }
+}
 
 // Inicializar Pool de conexiones a base de datos (Supabase) si la URL está presente
 const dbUrl = process.env.DATABASE_URL;
@@ -118,7 +129,7 @@ export async function fetchDashboardData() {
   }
 
   // --- FALLBACK EXCEL LOCAL ---
-  const data = getExcelData();
+  const data = await loadExcelData();
   const totalTasks = data.length;
   
   if (totalTasks === 0) {
@@ -341,7 +352,7 @@ export async function fetchTasks(page = 1, limit = 50, search = '', typeFilter =
   }
 
   // --- FALLBACK EXCEL LOCAL ---
-  const data = getExcelData();
+  const data = await loadExcelData();
   let filtered = data;
   
   if (search) {
