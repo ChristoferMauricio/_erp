@@ -4,6 +4,52 @@ Esta guía detalla **paso a paso** el procedimiento completo para configurar la 
 
 ---
 
+## 🔄 ACTUALIZACIÓN — pasos vigentes (junio 2026)
+
+> Esta sección refleja el estado **real** del proyecto y **tiene prioridad** sobre el detalle histórico de más abajo donde difieran.
+
+**Ya hecho:** la BD está cargada en Supabase (esquema + catálogos + datos + vistas) y, en local, la app y el microservicio ya leen de ahí. Falta solo **desplegar** el frontend (Vercel) y el microservicio (Render) para no depender de tu PC.
+
+### 1) Cargar la BD en Supabase — 4 archivos EN ORDEN
+1. `supabase/migrations/0001_initial_schema.sql` — esquema (`tarea.fecha_inicio` es **nullable**).
+2. `supabase/seed.sql` — catálogos.
+3. `supabase/migration_data.sql` — 2,277 tareas + insumos (**ya viene con los datos limpios**: `texto_original` y fechas corregidos).
+4. `supabase/migrations/0002_analytics_views.sql` — **vistas analíticas (NO olvidar; faltaba en la guía original)**.
+
+El archivo grande puede atragantar al SQL Editor del navegador; lo más fiable es `psql` (p. ej. el del contenedor Docker) con la cadena **Session pooler (5432)**:
+```bash
+psql "postgresql://postgres.<REF>:<PASS>@aws-1-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require" -v ON_ERROR_STOP=1 -f supabase/migrations/0001_initial_schema.sql
+# ...repetir con seed.sql, migration_data.sql y 0002_analytics_views.sql
+```
+
+### 2) Cadenas de conexión: ¡el puerto depende del servicio!
+| Uso | Driver | Puerto del pooler |
+|---|---|---|
+| **Vercel** (Next.js, serverless) | `pg` | **6543** (transaction) |
+| **Render** (FastAPI, proceso largo) | `pg8000` | **5432** (session) |
+| **Cargar SQL / migraciones** | psql / pg8000 | **5432** (session) |
+
+> Copia la cadena **exacta** desde Supabase → botón **Connect** (trae tu `ref` y región ya puestos). Ojo: el host puede ser `aws-1-...`, **no** siempre `aws-0-...`. Solo reemplazas la contraseña.
+
+### 3) Desplegar el microservicio en Render
+- **Root Directory:** `predictive` · **Runtime:** `Docker` (el Dockerfile ya bindea a `$PORT`).
+- **Env var:** `DATABASE_URL` = Session pooler **5432**.
+- Usa **`pg8000`** (puro Python, ya en `requirements.txt`); **ya no** requiere `psycopg2` ni `build-essential`.
+- Verifica `GET https://<tu-servicio>.onrender.com/health` → `"mode":"Supabase Cloud","database_connected":true`.
+
+### 4) Desplegar el frontend en Vercel
+- **Root Directory:** `web`.
+- **Env vars:** `DATABASE_URL` = Transaction pooler **6543** · `PREDICTIVE_API_URL` = URL pública de Render (sin `/` final).
+- *(No hacen falta `NEXT_PUBLIC_SUPABASE_*`: la app consulta la BD por `pg`, no por `supabase-js`.)*
+- Verifica: badge **"Postgres / Supabase"**, ~2,277 tareas y los gráficos de predicción (que llaman a Render).
+
+### 5) Seguridad
+Si la contraseña de BD se expuso, **resetéala** en Supabase (Settings → Database → Reset database password) y actualízala en `web/.env.local`, Vercel y Render. **Resetear no borra datos.**
+
+> **Nota Render Free:** el servicio se duerme tras ~15 min de inactividad; la primera petición tras dormir tarda ~30-60 s (cold start). Si Vercel muestra **0 tareas**, la `DATABASE_URL` está mal (cae al fallback Excel, vacío en la nube).
+
+---
+
 ## Requisitos Previos
 
 Antes de iniciar, asegúrate de tener lo siguiente:
@@ -134,7 +180,7 @@ Una vez que el proyecto esté activo (indicador verde), necesitas **3 credencial
 5. **Reemplaza `[YOUR-PASSWORD]`** con la contraseña real que creaste en el paso 1.1.
 6. **Guárdala como:** `DATABASE_URL`
 
-> **⚠️ IMPORTANTE:** Asegúrate de que el puerto sea `6543` (connection pooler) y **no** `5432` (conexión directa). El pooler es obligatorio para funcionar con Vercel y Render.
+> **⚠️ IMPORTANTE (corregido):** El puerto del pooler **depende del servicio** — ver la tabla en «🔄 ACTUALIZACIÓN» al inicio: **Vercel → 6543** (transaction), **Render y cargas SQL → 5432** (session). Evita la conexión **directa** (`db.<ref>.supabase.co`): es IPv6-only y no conecta desde muchos entornos.
 
 #### Resumen de credenciales
 
