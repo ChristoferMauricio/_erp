@@ -125,7 +125,7 @@ CREATE TABLE tarea (
     causa_raiz_id UUID REFERENCES cat_causa_raiz(id),
     cant_personas INTEGER CHECK (cant_personas >= 0),
     tiempo_horas NUMERIC(6, 2) CHECK (tiempo_horas >= 0),
-    fecha_inicio TIMESTAMP WITH TIME ZONE NOT NULL,
+    fecha_inicio TIMESTAMP WITH TIME ZONE, -- nullable: la data histórica tiene filas sin fecha registrada
     fecha_fin TIMESTAMP WITH TIME ZONE,
     periodo DATE,
     detalle TEXT,

@@ -19,222 +19,286 @@ const dbUrl = process.env.DATABASE_URL;
 let pool: Pool | null = null;
 
 if (dbUrl) {
+  // SSL solo para conexiones remotas (Supabase). En local (Docker/localhost) se desactiva.
+  const isLocal = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('sslmode=disable');
   pool = new Pool({
     connectionString: dbUrl,
-    ssl: {
-      rejectUnauthorized: false // Requerido para conexiones seguras en Supabase
-    }
+    ssl: isLocal ? false : { rejectUnauthorized: false }
   });
 }
 
-export async function fetchDashboardData() {
-  if (pool) {
-    try {
-      const client = await pool.connect();
-      
-      // 1. Métricas básicas
-      const statsRes = await client.query(`
-        SELECT 
-          COUNT(*)::int as total_tasks,
-          AVG(cant_personas)::float as avg_person,
-          AVG(tiempo_horas)::float as avg_hours
-        FROM tarea
-      `);
-      
-      const insumosQtyRes = await client.query(`
-        SELECT SUM(cantidad)::float as total_insumos_qty FROM tarea_insumo
-      `);
+// URL del microservicio de predicción (server-to-server; no se expone al navegador)
+const PREDICTIVE_URL = process.env.PREDICTIVE_API_URL || 'http://127.0.0.1:8000';
 
-      // 2. Top 8 Insumos
-      const topInsumosRes = await client.query(`
-        SELECT i.nombre_normalizado as name, SUM(ti.cantidad)::float as value
-        FROM tarea_insumo ti
-        JOIN insumo i ON ti.insumo_id = i.id
-        GROUP BY i.nombre_normalizado
-        ORDER BY value DESC
-        LIMIT 8
-      `);
+// ===== Helpers de analítica de carga (compartidos por ambas rutas) =====
 
-      // 3. Tareas por Subsistema
-      const subsistemasRes = await client.query(`
-        SELECT cs.codigo as name, COUNT(*)::int as value
-        FROM tarea t
-        JOIN cat_causa_raiz cr ON t.causa_raiz_id = cr.id
-        JOIN cat_subsistema cs ON cr.subsistema_id = cs.id
-        GROUP BY cs.codigo
-        ORDER BY value DESC
-      `);
-
-      // 4. Zonas Calientes (Ubicaciones)
-      const topLocationsRes = await client.query(`
-        SELECT (u.nivel || ' > ' || u.zona) as name, COUNT(*)::int as value
-        FROM tarea t
-        JOIN ubicacion u ON t.ubicacion_id = u.id
-        GROUP BY u.nivel, u.zona
-        ORDER BY value DESC
-        LIMIT 6
-      `);
-
-      // 5. Tendencia Mensual
-      const monthlyTrendRes = await client.query(`
-        SELECT to_char(t.periodo, 'YYYY-MM') as month,
-               COUNT(CASE WHEN ct.nombre = 'Incidente' THEN 1 END)::int as incidentes,
-               COUNT(CASE WHEN ct.nombre = 'Requerimiento' THEN 1 END)::int as requerimientos,
-               COUNT(*)::int as total
-        FROM tarea t
-        JOIN cat_tipo ct ON t.tipo_id = ct.id
-        WHERE t.periodo IS NOT NULL
-        GROUP BY to_char(t.periodo, 'YYYY-MM')
-        ORDER BY month ASC
-      `);
-
-      // 6. Distribución de Origen
-      const originRes = await client.query(`
-        SELECT co.nombre as name, COUNT(*)::int as value
-        FROM tarea t
-        JOIN cat_origen co ON t.origen_id = co.id
-        GROUP BY co.nombre
-      `);
-
-      // 7. Distribución de Tipo
-      const tipoRes = await client.query(`
-        SELECT ct.nombre as name, COUNT(*)::int as value
-        FROM tarea t
-        JOIN cat_tipo ct ON t.tipo_id = ct.id
-        GROUP BY ct.nombre
-      `);
-
-      client.release();
-
-      const stats = statsRes.rows[0];
-      const insumosQty = insumosQtyRes.rows[0].total_insumos_qty || 0;
-
-      return {
-        totalTasks: stats.total_tasks,
-        totalInsumosQty: Math.round(insumosQty),
-        avgPerson: Math.round((stats.avg_person || 0) * 10) / 10,
-        avgHours: Math.round((stats.avg_hours || 0) * 10) / 10,
-        topInsumos: topInsumosRes.rows,
-        subsistemas: subsistemasRes.rows,
-        topLocations: topLocationsRes.rows,
-        monthlyTrend: monthlyTrendRes.rows,
-        originDistribution: originRes.rows,
-        tipoDistribution: tipoRes.rows
-      };
-
-    } catch (error) {
-      console.error("Error al consultar Supabase, reintentando con Excel local:", error);
-      // Fallback a Excel local en caso de error de conexión
-    }
+// Proyección baseline: regresión lineal simple sobre el índice temporal.
+// Con <3 puntos cae a la media (el histórico es corto, ver TdR §10).
+function proyectarBaseline(values: number[], meses: number): number[] {
+  const n = values.length;
+  if (n === 0) return Array(meses).fill(0);
+  if (n < 3) {
+    const m = values.reduce((a, b) => a + b, 0) / n;
+    return Array(meses).fill(Math.max(0, m));
   }
-
-  // --- FALLBACK EXCEL LOCAL ---
-  const data = await loadExcelData();
-  const totalTasks = data.length;
-  
-  if (totalTasks === 0) {
-    return {
-      totalTasks: 0,
-      totalInsumosQty: 0,
-      avgPerson: 0,
-      avgHours: 0,
-      topInsumos: [],
-      subsistemas: [],
-      topLocations: [],
-      monthlyTrend: [],
-      originDistribution: [],
-      tipoDistribution: []
-    };
+  const xs = values.map((_, i) => i);
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = values.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (xs[i] - meanX) * (values[i] - meanY);
+    den += (xs[i] - meanX) ** 2;
   }
+  const slope = den === 0 ? 0 : num / den;
+  const intercept = meanY - slope * meanX;
+  const out: number[] = [];
+  for (let k = 1; k <= meses; k++) out.push(Math.max(0, intercept + slope * (n - 1 + k)));
+  return out;
+}
+
+function siguientesMeses(ultimoMes: string | null, meses: number): string[] {
+  const out: string[] = [];
+  let d = ultimoMes ? new Date(`${ultimoMes}-01T00:00:00`) : new Date();
+  for (let i = 0; i < meses; i++) {
+    d = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+  return out;
+}
+
+interface PuntoCarga {
+  month: string;
+  hh: number | null;
+  tareas: number | null;
+  hhProy: number | null;
+  tareasProy: number | null;
+}
+
+// Une el histórico de carga (HH y nº tareas por mes) con la proyección a N meses.
+// El último punto histórico siembra la línea de proyección para que conecte visualmente.
+function construirProyeccionCarga(
+  serie: { month: string; hh: number; tareas: number }[],
+  meses = 3
+): PuntoCarga[] {
+  const ordenada = [...serie].sort((a, b) => a.month.localeCompare(b.month));
+  const hhProj = proyectarBaseline(ordenada.map(s => s.hh), meses);
+  const tareasProj = proyectarBaseline(ordenada.map(s => s.tareas), meses);
+
+  const result: PuntoCarga[] = ordenada.map(s => ({
+    month: s.month, hh: s.hh, tareas: s.tareas, hhProy: null, tareasProy: null
+  }));
+  if (result.length > 0) {
+    result[result.length - 1].hhProy = ordenada[ordenada.length - 1].hh;
+    result[result.length - 1].tareasProy = ordenada[ordenada.length - 1].tareas;
+  }
+  const ultimo = ordenada.length ? ordenada[ordenada.length - 1].month : null;
+  const futuros = siguientesMeses(ultimo, meses);
+  for (let i = 0; i < meses; i++) {
+    result.push({
+      month: futuros[i], hh: null, tareas: null,
+      hhProy: Math.round(hhProj[i]), tareasProy: Math.round(tareasProj[i])
+    });
+  }
+  return result;
+}
+
+export type DashFilters = { subsistema?: string; tipo?: string; origen?: string };
+
+interface DashTask {
+  tipo: string;
+  origen: string;
+  causa_raiz: string;
+  subsistema: string;
+  ubicacion: { nivel: string; zona: string; punto: string | null };
+  cant_personas: number;
+  tiempo_horas: number;
+  horas_hombre: number;
+  periodo: string | null;
+  detalle: string | null;
+  insumos: { name: string; cantidad: number; unidad: string; esLineaSeparada: boolean }[];
+}
+
+// Subsistema según el código entre paréntesis de la causa (p.ej. "...(CCTV)")
+function inferSub(causa: string | null | undefined): string {
+  if (!causa) return 'DAT';
+  const m = causa.match(/\(([A-Za-z\-]+)\)/);
+  if (m) { const c = m[1].toUpperCase(); return c === 'WI-FI' ? 'WIFI' : c; }
+  return 'DAT';
+}
+
+function taskMatchesFilters(t: DashTask, f: DashFilters): boolean {
+  if (f.subsistema && t.subsistema !== f.subsistema) return false;
+  if (f.tipo && t.tipo !== f.tipo) return false;
+  if (f.origen && t.origen !== f.origen) return false;
+  return true;
+}
+
+// Construye TODO el dashboard a partir de una lista de tareas (de BD o Excel).
+// Unifica la analítica: los filtros solo recortan esta lista y todo se recalcula.
+function buildDashboardFromTasks(tasks: DashTask[], source: string) {
+  const totalTasks = tasks.length;
 
   let totalInsumosQty = 0;
-  const insumosCountMap: { [key: string]: number } = {};
-  const subsistemaCountMap: { [key: string]: number } = {};
-  const originCountMap: { [key: string]: number } = { IM: 0, SUP: 0 };
-  const tipoCountMap: { [key: string]: number } = { Incidente: 0, Requerimiento: 0 };
-  
-  let totalPerson = 0;
-  let totalHours = 0;
-  
-  const periodMap: { [key: string]: { incidentes: number, requerimientos: number } } = {};
-  const locationFaultsMap: { [key: string]: number } = {};
-  
-  data.forEach(t => {
+  const insumosCountMap: { [k: string]: number } = {};
+  const subsistemaCountMap: { [k: string]: number } = {};
+  const originCountMap: { [k: string]: number } = { IM: 0, SUP: 0 };
+  const tipoCountMap: { [k: string]: number } = { Incidente: 0, Requerimiento: 0 };
+  let totalPerson = 0, totalHours = 0, totalHH = 0;
+  const periodMap: { [k: string]: { incidentes: number; requerimientos: number } } = {};
+  const locationFaultsMap: { [k: string]: number } = {};
+  const causaMap: { [k: string]: { count: number; horas: number; hh: number; detalles: { [d: string]: number } } } = {};
+  const nivelMap: { [k: string]: { hh: number; horas: number; tareas: number } } = {};
+  const insumoHHMap: { [k: string]: number } = {};
+  const insumoHorasMap: { [k: string]: number } = {};
+  const hhPeriodMap: { [k: string]: { hh: number; tareas: number } } = {};
+  let lineasMaterial = 0, actividadesConMaterial = 0;
+  const suministrosPorUnidad: { [u: string]: number } = { UN: 0, M: 0, LT: 0 };
+  // ANS/SLA por esfuerzo (columna Tiempo): objetivo de horas por tipo de tarea
+  const SLA_OBJETIVO: { [tipo: string]: number } = { Incidente: 3, Requerimiento: 4 };
+  let slaTotal = 0, slaCumple = 0;
+  const slaPorTipo: { [tipo: string]: { total: number; cumple: number } } = {
+    Incidente: { total: 0, cumple: 0 },
+    Requerimiento: { total: 0, cumple: 0 }
+  };
+
+  tasks.forEach(t => {
     totalPerson += t.cant_personas || 0;
     totalHours += t.tiempo_horas || 0;
-    
-    const causeClean = t.causa_raiz || 'Mantenimiento Programado';
-    const subMatch = causeClean.match(/\(([A-Za-z\-]+)\)/);
-    let subCode = subMatch ? subMatch[1].toUpperCase() : 'DAT';
-    if (subCode === 'WI-FI') subCode = 'WIFI';
-    
+    totalHH += t.horas_hombre || 0;
+
+    const causaKey = t.causa_raiz || 'Mantenimiento Programado';
+    if (!causaMap[causaKey]) causaMap[causaKey] = { count: 0, horas: 0, hh: 0, detalles: {} };
+    causaMap[causaKey].count++;
+    causaMap[causaKey].horas += t.tiempo_horas || 0;
+    causaMap[causaKey].hh += t.horas_hombre || 0;
+    const detKey = (t.detalle && t.detalle.trim()) ? t.detalle.trim() : '(sin detalle)';
+    causaMap[causaKey].detalles[detKey] = (causaMap[causaKey].detalles[detKey] || 0) + 1;
+
+    const nivKey = t.ubicacion.nivel || 'Interior Mina';
+    if (!nivelMap[nivKey]) nivelMap[nivKey] = { hh: 0, horas: 0, tareas: 0 };
+    nivelMap[nivKey].hh += t.horas_hombre || 0;
+    nivelMap[nivKey].horas += t.tiempo_horas || 0;
+    nivelMap[nivKey].tareas++;
+
+    if (t.periodo) {
+      const m = t.periodo.substring(0, 7);
+      if (!hhPeriodMap[m]) hhPeriodMap[m] = { hh: 0, tareas: 0 };
+      hhPeriodMap[m].hh += t.horas_hombre || 0;
+      hhPeriodMap[m].tareas++;
+    }
+
+    const subCode = t.subsistema || 'DAT';
     subsistemaCountMap[subCode] = (subsistemaCountMap[subCode] || 0) + 1;
-    
-    if (t.origen === 'SUP') {
-      originCountMap.SUP++;
-    } else {
-      originCountMap.IM++;
+
+    if (t.origen === 'SUP') originCountMap.SUP++; else originCountMap.IM++;
+    const tipoKey = t.tipo === 'Incidente' ? 'Incidente' : 'Requerimiento';
+    tipoCountMap[tipoKey]++;
+    // ANS por esfuerzo: contar solo tareas con tiempo registrado (>0)
+    if ((t.tiempo_horas || 0) > 0) {
+      slaTotal++;
+      slaPorTipo[tipoKey].total++;
+      if (t.tiempo_horas <= SLA_OBJETIVO[tipoKey]) { slaCumple++; slaPorTipo[tipoKey].cumple++; }
     }
-    
-    if (t.tipo === 'Incidente') {
-      tipoCountMap.Incidente++;
-    } else {
-      tipoCountMap.Requerimiento++;
-    }
-    
+
     const locName = `${t.ubicacion.nivel} > ${t.ubicacion.zona}`;
     locationFaultsMap[locName] = (locationFaultsMap[locName] || 0) + 1;
-    
+
     if (t.periodo) {
       const month = t.periodo.substring(0, 7);
-      if (!periodMap[month]) {
-        periodMap[month] = { incidentes: 0, requerimientos: 0 };
-      }
-      if (t.tipo === 'Incidente') {
-        periodMap[month].incidentes++;
-      } else {
-        periodMap[month].requerimientos++;
-      }
+      if (!periodMap[month]) periodMap[month] = { incidentes: 0, requerimientos: 0 };
+      if (t.tipo === 'Incidente') periodMap[month].incidentes++; else periodMap[month].requerimientos++;
     }
-    
+
     t.insumos.forEach(ins => {
       totalInsumosQty += ins.cantidad;
       insumosCountMap[ins.name] = (insumosCountMap[ins.name] || 0) + ins.cantidad;
+      insumoHHMap[ins.name] = (insumoHHMap[ins.name] || 0) + (t.horas_hombre || 0);
+      insumoHorasMap[ins.name] = (insumoHorasMap[ins.name] || 0) + (t.tiempo_horas || 0);
+      const u = suministrosPorUnidad[ins.unidad] !== undefined ? ins.unidad : 'UN';
+      suministrosPorUnidad[u] += ins.cantidad;
     });
+    // Modelo de bloque: cada actividad es cabecera + sus filas de material
+    lineasMaterial += t.insumos.length;
+    if (t.insumos.length > 0) actividadesConMaterial++;
   });
-  
+
   const topInsumos = Object.entries(insumosCountMap)
     .map(([name, val]) => ({ name, value: Math.round(val * 100) / 100 }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 8);
-    
+    .sort((a, b) => b.value - a.value).slice(0, 8);
   const subsistemas = Object.entries(subsistemaCountMap)
-    .map(([name, value]) => ({ name, value }))
-    .sort((a, b) => b.value - a.value);
-    
+    .map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   const topLocations = Object.entries(locationFaultsMap)
-    .map(([name, value]) => ({ name, value }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 6);
-    
+    .map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 6);
   const monthlyTrend = Object.entries(periodMap)
-    .map(([month, val]) => ({
-      month,
-      incidentes: val.incidentes,
-      requerimientos: val.requerimientos,
-      total: val.incidentes + val.requerimientos
-    }))
+    .map(([month, val]) => ({ month, incidentes: val.incidentes, requerimientos: val.requerimientos, total: val.incidentes + val.requerimientos }))
     .sort((a, b) => a.month.localeCompare(b.month));
+  const hhPorCausa = Object.entries(causaMap)
+    .map(([name, v]) => ({ name, tareas: v.count, horas: Math.round(v.horas), hh: Math.round(v.hh) }))
+    .sort((a, b) => b.hh - a.hh).slice(0, 8);
+  const hhPorNivel = Object.entries(nivelMap)
+    .map(([name, v]) => ({ name, hh: Math.round(v.hh), horas: Math.round(v.horas), tareas: v.tareas }))
+    .sort((a, b) => b.hh - a.hh).slice(0, 8);
+  const causaDetalle = Object.entries(causaMap)
+    .sort((a, b) => b[1].count - a[1].count).slice(0, 6)
+    .map(([name, v]) => ({
+      name, total: v.count, hh: Math.round(v.hh),
+      detalles: Object.entries(v.detalles).map(([d, c]) => ({ name: d, value: c })).sort((a, b) => b.value - a.value).slice(0, 5)
+    }));
+  const mermas = Object.keys(insumosCountMap)
+    .map(name => {
+      const qty = insumosCountMap[name];
+      const hh = insumoHHMap[name] || 0;
+      const horas = insumoHorasMap[name] || 0;
+      return {
+        name, cantidad: Math.round(qty * 100) / 100, hh: Math.round(hh),
+        porHH: hh > 0 ? Math.round((qty / hh) * 1000) / 1000 : 0,
+        porHora: horas > 0 ? Math.round((qty / horas) * 1000) / 1000 : 0
+      };
+    })
+    .filter(x => x.hh >= 10).sort((a, b) => b.porHH - a.porHH).slice(0, 8);
+  const materialesResumen = {
+    actividades: totalTasks,
+    lineasMaterial,
+    promPorActividad: totalTasks ? Math.round((lineasMaterial / totalTasks) * 10) / 10 : 0,
+    actividadesConMaterial,
+    pctConMaterial: totalTasks ? Math.round((actividadesConMaterial / totalTasks) * 100) : 0
+  };
+  const cargaSerie = Object.entries(hhPeriodMap).map(([month, v]) => ({ month, hh: Math.round(v.hh), tareas: v.tareas }));
+  const cargaProyeccion = construirProyeccionCarga(cargaSerie, 3);
+  const insumoNames = Object.keys(insumosCountMap).sort((a, b) => insumosCountMap[b] - insumosCountMap[a]);
+
+  // (12) Suministros por unidad (UN/M/LT son magnitudes distintas: no se suman entre sí)
+  const suministros = {
+    UN: Math.round(suministrosPorUnidad.UN || 0),
+    M: Math.round(suministrosPorUnidad.M || 0),
+    LT: Math.round((suministrosPorUnidad.LT || 0) * 100) / 100
+  };
+
+  // (10) ANS/SLA usando la columna Tiempo como esfuerzo de resolución (las fechas no sirven)
+  const mkSla = (o: { total: number; cumple: number }, objetivo: number, tipo: string) => ({
+    tipo, objetivo, total: o.total, cumple: o.cumple,
+    pct: o.total ? Math.round((o.cumple / o.total) * 100) : 0
+  });
+  const sla = {
+    total: slaTotal,
+    cumple: slaCumple,
+    pct: slaTotal ? Math.round((slaCumple / slaTotal) * 100) : 0,
+    porTipo: [
+      mkSla(slaPorTipo.Incidente, SLA_OBJETIVO.Incidente, 'Incidente'),
+      mkSla(slaPorTipo.Requerimiento, SLA_OBJETIVO.Requerimiento, 'Requerimiento')
+    ]
+  };
 
   return {
     totalTasks,
     totalInsumosQty: Math.round(totalInsumosQty),
-    avgPerson: Math.round((totalPerson / totalTasks) * 10) / 10,
-    avgHours: Math.round((totalHours / totalTasks) * 10) / 10,
-    topInsumos,
-    subsistemas,
-    topLocations,
-    monthlyTrend,
+    avgPerson: totalTasks ? Math.round((totalPerson / totalTasks) * 10) / 10 : 0,
+    avgHours: totalTasks ? Math.round((totalHours / totalTasks) * 10) / 10 : 0,
+    totalHH: Math.round(totalHH),
+    totalHoras: Math.round(totalHours),
+    topInsumos, subsistemas, topLocations, monthlyTrend,
+    hhPorCausa, hhPorNivel, causaDetalle, mermas, materialesResumen, cargaProyeccion,
+    insumoNames, suministros, sla,
     originDistribution: [
       { name: 'Interior Mina', value: originCountMap.IM },
       { name: 'Superficie', value: originCountMap.SUP }
@@ -242,9 +306,105 @@ export async function fetchDashboardData() {
     tipoDistribution: [
       { name: 'Incidentes', value: tipoCountMap.Incidente },
       { name: 'Requerimientos', value: tipoCountMap.Requerimiento }
-    ]
+    ],
+    source
   };
 }
+
+export async function fetchDashboardData(filters: DashFilters = {}) {
+  if (pool) {
+    try {
+      const client = await pool.connect();
+      const where: string[] = [];
+      const params: any[] = [];
+      let pi = 1;
+      if (filters.tipo) { where.push(`ct.nombre = $${pi++}`); params.push(filters.tipo); }
+      if (filters.origen) { where.push(`co.nombre = $${pi++}`); params.push(filters.origen); }
+      if (filters.subsistema) { where.push(`cs.codigo = $${pi++}`); params.push(filters.subsistema); }
+      const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+
+      // Filas de tarea con dimensiones (filtros aplicados en SQL)
+      const tareasRes = await client.query(`
+        SELECT t.id, ct.nombre AS tipo, co.nombre AS origen,
+               COALESCE(cr.nombre, 'Mantenimiento Programado') AS causa_raiz,
+               COALESCE(cs.codigo, 'DAT') AS subsistema,
+               COALESCE(u.nivel, 'Interior Mina') AS nivel,
+               COALESCE(u.zona, 'General') AS zona, u.punto,
+               COALESCE(t.cant_personas, 0) AS cant_personas,
+               COALESCE(t.tiempo_horas, 0)::float AS tiempo_horas,
+               to_char(t.periodo, 'YYYY-MM') AS periodo, t.detalle
+        FROM tarea t
+        JOIN cat_tipo ct ON t.tipo_id = ct.id
+        JOIN cat_origen co ON t.origen_id = co.id
+        LEFT JOIN cat_causa_raiz cr ON t.causa_raiz_id = cr.id
+        LEFT JOIN cat_subsistema cs ON cr.subsistema_id = cs.id
+        LEFT JOIN ubicacion u ON t.ubicacion_id = u.id
+        ${whereSql}
+      `, params);
+
+      const insumosRes = await client.query(`
+        SELECT ti.tarea_id, i.nombre_normalizado AS name, ti.cantidad::float AS cantidad, cum.simbolo AS unidad
+        FROM tarea_insumo ti
+        JOIN insumo i ON ti.insumo_id = i.id
+        JOIN cat_unidad_medida cum ON ti.unidad_medida_id = cum.id
+        JOIN tarea t ON ti.tarea_id = t.id
+        JOIN cat_tipo ct ON t.tipo_id = ct.id
+        JOIN cat_origen co ON t.origen_id = co.id
+        LEFT JOIN cat_causa_raiz cr ON t.causa_raiz_id = cr.id
+        LEFT JOIN cat_subsistema cs ON cr.subsistema_id = cs.id
+        ${whereSql}
+      `, params);
+
+      client.release();
+
+      const insByTask: { [k: string]: { name: string; cantidad: number; unidad: string; esLineaSeparada: boolean }[] } = {};
+      insumosRes.rows.forEach((r: any) => {
+        if (!insByTask[r.tarea_id]) insByTask[r.tarea_id] = [];
+        insByTask[r.tarea_id].push({ name: r.name, cantidad: r.cantidad, unidad: r.unidad || 'UN', esLineaSeparada: false });
+      });
+      const tasks: DashTask[] = tareasRes.rows.map((r: any) => ({
+        tipo: r.tipo,
+        origen: r.origen,
+        causa_raiz: r.causa_raiz,
+        subsistema: r.subsistema,
+        ubicacion: { nivel: r.nivel, zona: r.zona, punto: r.punto },
+        cant_personas: r.cant_personas,
+        tiempo_horas: r.tiempo_horas,
+        horas_hombre: (r.cant_personas || 0) * (r.tiempo_horas || 0),
+        periodo: r.periodo,
+        detalle: r.detalle,
+        insumos: insByTask[r.id] || []
+      }));
+      return buildDashboardFromTasks(tasks, 'supabase');
+    } catch (error) {
+      console.error("Error al consultar Supabase, reintentando con Excel local:", error);
+    }
+  }
+
+  // --- FALLBACK EXCEL LOCAL ---
+  const raw = await loadExcelData();
+  const tasks: DashTask[] = raw
+    .map(t => ({
+      tipo: t.tipo,
+      origen: t.origen,
+      causa_raiz: t.causa_raiz || 'Mantenimiento Programado',
+      subsistema: inferSub(t.causa_raiz),
+      ubicacion: {
+        nivel: t.ubicacion.nivel || 'Interior Mina',
+        zona: t.ubicacion.zona || 'General',
+        punto: t.ubicacion.punto
+      },
+      cant_personas: t.cant_personas || 0,
+      tiempo_horas: t.tiempo_horas || 0,
+      horas_hombre: t.horas_hombre || 0,
+      periodo: t.periodo,
+      detalle: t.detalle,
+      insumos: t.insumos.map(i => ({ name: i.name, cantidad: i.cantidad, unidad: i.unidad, esLineaSeparada: i.esLineaSeparada }))
+    }))
+    .filter(t => taskMatchesFilters(t, filters));
+  return buildDashboardFromTasks(tasks, 'excel');
+}
+
 
 export async function fetchTasks(page = 1, limit = 50, search = '', typeFilter = '', originFilter = '') {
   if (pool) {
@@ -378,10 +538,76 @@ export async function fetchTasks(page = 1, limit = 50, search = '', typeFilter =
   const start = (page - 1) * limit;
   const end = start + limit;
   const items = filtered.slice(start, end);
-  
+
   return {
     items,
     total,
     pages: Math.ceil(total / limit)
   };
+}
+
+// ===================== PREDICCIÓN (microservicio FastAPI) =====================
+
+// Proyección de carga de trabajo (HH y nº tareas/mes) desde /predict/carga.
+// Devuelve puntos listos para el área (histórico sólido + proyección punteada).
+// Si el microservicio no responde, ok:false (la UI cae al baseline local).
+export async function fetchCargaPrediction(meses = 3) {
+  try {
+    const res = await fetch(`${PREDICTIVE_URL}/predict/carga?meses_proyeccion=${meses}`, { cache: 'no-store' });
+    if (!res.ok) return { ok: false, data: [] as any[] };
+    const j = await res.json();
+    const hist = j.historico || [];
+    const proy = j.proyeccion || [];
+    const points = hist.map((h: any) => ({
+      month: h.month, hh: Math.round(h.hh), tareas: h.tareas, hhProy: null as number | null, tareasProy: null as number | null
+    }));
+    if (points.length) {
+      points[points.length - 1].hhProy = Math.round(hist[hist.length - 1].hh);
+      points[points.length - 1].tareasProy = hist[hist.length - 1].tareas;
+    }
+    proy.forEach((p: any) => points.push({
+      month: p.month, hh: null, tareas: null, hhProy: Math.round(p.hh), tareasProy: p.tareas
+    }));
+    return { ok: true, data: points };
+  } catch {
+    return { ok: false, data: [] as any[] };
+  }
+}
+
+// Predicción de demanda de un insumo desde /predict/insumos.
+export async function fetchInsumosPrediction(insumo: string, meses = 3) {
+  try {
+    const url = `${PREDICTIVE_URL}/predict/insumos?meses_proyeccion=${meses}` +
+      (insumo ? `&insumo_nombre=${encodeURIComponent(insumo)}` : '');
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return { ok: false, insumo, data: [] as any[] };
+    const j = await res.json();
+    const p = (j.predictions && j.predictions[0]) || null;
+    if (!p) return { ok: true, insumo, data: [] as any[] };
+    const hist = p.historico || [];
+    const proy = p.proyeccion || [];
+    const points = hist.map((h: any) => ({
+      fecha: String(h.fecha).substring(0, 7), cantidad: Math.round(h.cantidad * 100) / 100, cantidadProy: null as number | null
+    }));
+    if (points.length) points[points.length - 1].cantidadProy = Math.round(hist[hist.length - 1].cantidad * 100) / 100;
+    proy.forEach((x: any) => points.push({
+      fecha: String(x.fecha).substring(0, 7), cantidad: null, cantidadProy: Math.round(x.cantidad * 100) / 100
+    }));
+    return { ok: true, insumo: p.insumo, data: points };
+  } catch {
+    return { ok: false, insumo, data: [] as any[] };
+  }
+}
+
+// Riesgo de falla por zona desde /predict/mantenimiento (cruza incidentes por nivel/zona).
+export async function fetchMantenimientoPrediction(nivel?: string) {
+  try {
+    const url = `${PREDICTIVE_URL}/predict/mantenimiento` + (nivel ? `?nivel=${encodeURIComponent(nivel)}` : '');
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return { ok: false, data: [] as any[] };
+    const j = await res.json();
+    return { ok: true, data: (j.results || []) as any[] };
+  } catch {
+    return { ok: false, data: [] as any[] };
+  }
 }

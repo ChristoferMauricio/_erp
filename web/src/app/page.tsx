@@ -4,22 +4,21 @@ import React, { useState, useEffect, useTransition } from 'react';
 import { useTheme } from '@/components/ThemeProvider';
 import {
   fetchDashboardData,
-  fetchTasks
+  fetchTasks,
+  fetchCargaPrediction,
+  fetchInsumosPrediction,
+  fetchMantenimientoPrediction
 } from './actions';
 import {
   Wrench,
-  Database,
   TrendingUp,
   Boxes,
   Users,
   Clock,
   MapPin,
   Search,
-  Server,
-  CheckCircle2,
   ChevronRight,
   ChevronLeft,
-  AlertCircle,
   FileText,
   HelpCircle,
   Activity,
@@ -33,6 +32,9 @@ import {
   BarChart3,
   Bell,
   Menu,
+  Filter,
+  ShieldCheck,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -88,7 +90,7 @@ function inferSubsystem(cause: string | null | undefined): string {
 
 export default function Home() {
   const { theme, toggleTheme } = useTheme();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'tasks' | 'supabase'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'productividad' | 'inventario' | 'mantenimiento' | 'tasks'>('dashboard');
   const [mounted, setMounted] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -105,15 +107,47 @@ export default function Home() {
 
   const [selectedTask, setSelectedTask] = useState<any>(null);
 
+  // Filtros interactivos (re-consultan el dashboard) y estado de predicción
+  const [filters, setFilters] = useState<{ subsistema?: string; tipo?: string; origen?: string }>({});
+  const [cargaPred, setCargaPred] = useState<any[] | null>(null);
+  const [cargaMetric, setCargaMetric] = useState<'hh' | 'tareas'>('hh');
+  const [selectedInsumo, setSelectedInsumo] = useState<string>('');
+  const [insumoPred, setInsumoPred] = useState<any[] | null>(null);
+  const [insumoPredLoading, setInsumoPredLoading] = useState(false);
+  const [riesgoZonas, setRiesgoZonas] = useState<any[] | null>(null);
+
   const [isPending, startTransition] = useTransition();
 
   useEffect(() => {
     setMounted(true);
-    fetchDashboardData().then(data => {
-      setDashboardData(data);
-    });
+    fetchDashboardData(filters).then(setDashboardData);
+    fetchCargaPrediction().then(r => { if (r.ok) setCargaPred(r.data); });
+    fetchMantenimientoPrediction().then(r => { if (r.ok) setRiesgoZonas(r.data); });
     loadTasks(1, '', '', '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Re-consultar el dashboard cuando cambian los filtros
+  useEffect(() => {
+    if (!mounted) return;
+    fetchDashboardData(filters).then(setDashboardData);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters]);
+
+  // Seleccionar un insumo por defecto cuando llegan los datos
+  useEffect(() => {
+    if (dashboardData?.insumoNames?.length && !selectedInsumo) {
+      setSelectedInsumo(dashboardData.insumoNames[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dashboardData]);
+
+  // Pedir la predicción del insumo seleccionado al microservicio
+  useEffect(() => {
+    if (!selectedInsumo) return;
+    setInsumoPredLoading(true);
+    fetchInsumosPrediction(selectedInsumo).then(r => { setInsumoPred(r.data); setInsumoPredLoading(false); });
+  }, [selectedInsumo]);
 
   const loadTasks = (page: number, searchVal: string, typeVal: string, originVal: string) => {
     startTransition(async () => {
@@ -163,15 +197,19 @@ export default function Home() {
   const axisStroke = theme === 'dark' ? '#64748b' : '#9ca3af';
 
   const navItems = [
-    { id: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard, desc: 'Analítica general' },
+    { id: 'dashboard' as const, label: 'Resumen', icon: LayoutDashboard, desc: 'Visión general' },
+    { id: 'productividad' as const, label: 'Productividad', icon: TrendingUp, desc: 'Tiempo y Horas-Hombre' },
+    { id: 'inventario' as const, label: 'Inventario', icon: Boxes, desc: 'Suministros y mermas' },
+    { id: 'mantenimiento' as const, label: 'Mantenimiento', icon: Activity, desc: 'Zonas calientes y causas' },
     { id: 'tasks' as const, label: 'Tareas', icon: Wrench, desc: 'Registro de operaciones', badge: totalTasks },
-    { id: 'supabase' as const, label: 'Infraestructura', icon: Database, desc: 'Base de datos & SQL' },
   ];
 
   const tabLabels: Record<string, string> = {
-    dashboard: 'Dashboard Analítico',
+    dashboard: 'Resumen Analítico',
+    productividad: 'Productividad · Tiempo & HH',
+    inventario: 'Inventario · Suministros',
+    mantenimiento: 'Mantenimiento · Análisis',
     tasks: 'Registro de Tareas',
-    supabase: 'Infraestructura & SQL',
   };
 
   if (!mounted) {
@@ -279,7 +317,6 @@ export default function Home() {
               </span>
             )}
             {[
-              { label: 'Inventario', icon: Boxes },
               { label: 'Personal', icon: Users },
               { label: 'Reportes', icon: FileText },
             ].map(item => {
@@ -314,9 +351,9 @@ export default function Home() {
             </button>
           ) : (
             <div className="flex items-center gap-2 px-2 py-1">
-              <div className="flex items-center gap-1.5 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/20 rounded-lg px-2.5 py-1.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
-                <span className="text-[10px] font-semibold text-amber-700 dark:text-amber-400">Excel Local</span>
+              <div className={`flex items-center gap-1.5 border rounded-lg px-2.5 py-1.5 ${dashboardData?.source === 'supabase' ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20' : 'bg-amber-50 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/20'}`}>
+                <span className={`h-1.5 w-1.5 rounded-full animate-pulse ${dashboardData?.source === 'supabase' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                <span className={`text-[10px] font-semibold ${dashboardData?.source === 'supabase' ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-400'}`}>{dashboardData?.source === 'supabase' ? 'Postgres / Supabase' : 'Excel Local'}</span>
               </div>
               <span className="text-[10px] text-gray-400 dark:text-slate-600 font-medium ml-auto">v1.0</span>
             </div>
@@ -411,12 +448,14 @@ export default function Home() {
                 </div>
                 <div className="mt-3 flex items-baseline gap-2">
                   <span className="text-3xl font-extrabold text-gray-900 dark:text-white tracking-tight">
-                    {dashboardData ? dashboardData.totalInsumosQty.toLocaleString() : '---'}
+                    {dashboardData ? dashboardData.suministros.UN.toLocaleString() : '---'}
                   </span>
-                  <span className="text-xs text-gray-400 dark:text-slate-500">unidades</span>
+                  <span className="text-xs text-gray-400 dark:text-slate-500">UN</span>
                 </div>
-                <p className="text-[11px] text-teal-600 dark:text-teal-400 mt-2 flex items-center gap-1 font-medium">
-                  114 insumos normalizados <ArrowUpRight className="h-3 w-3" />
+                <p className="text-[11px] text-teal-600 dark:text-teal-400 mt-2 flex items-center gap-2 font-medium">
+                  <span>{dashboardData ? dashboardData.suministros.M.toLocaleString() : '--'} m</span>
+                  <span className="text-gray-300 dark:text-slate-600">·</span>
+                  <span>{dashboardData ? dashboardData.suministros.LT.toLocaleString() : '--'} lt</span>
                 </p>
               </div>
 
@@ -446,7 +485,7 @@ export default function Home() {
                   <Clock className="h-28 w-28" />
                 </div>
                 <div className="flex justify-between items-start">
-                  <span className="text-[11px] font-semibold text-gray-400 dark:text-slate-500 tracking-wider uppercase">Resolución</span>
+                  <span className="text-[11px] font-semibold text-gray-400 dark:text-slate-500 tracking-wider uppercase">Tiempo / Tarea</span>
                   <span className="bg-rose-50 dark:bg-rose-500/10 text-rose-500 dark:text-rose-400 p-1.5 rounded-lg">
                     <Clock className="h-4 w-4" />
                   </span>
@@ -458,19 +497,47 @@ export default function Home() {
                   <span className="text-xs text-gray-400 dark:text-slate-500">horas prom.</span>
                 </div>
                 <p className="text-[11px] text-rose-500 dark:text-rose-400 mt-2 flex items-center gap-1 font-medium">
-                  Base SLA operativo <ArrowUpRight className="h-3 w-3" />
+                  Esfuerzo medio (col. Tiempo) <ArrowUpRight className="h-3 w-3" />
                 </p>
               </div>
             </div>
 
-            {/* ========== DASHBOARD TAB ========== */}
-            {activeTab === 'dashboard' && (
+            {/* ========== MÓDULOS ANALÍTICOS (Resumen / Productividad / Inventario / Mantenimiento) ========== */}
+            {(activeTab === 'dashboard' || activeTab === 'productividad' || activeTab === 'inventario' || activeTab === 'mantenimiento') && (
               <div className="space-y-6">
-                {dashboardData ? (
-                  <>
-                    {/* Row 1: Trend + Subsystems */}
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* ===== BARRA DE FILTROS INTERACTIVOS ===== */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-3 flex flex-wrap gap-2.5 items-center">
+                  <span className="text-xs font-semibold text-gray-500 dark:text-slate-400 flex items-center gap-1.5 px-1">
+                    <Filter className="h-3.5 w-3.5" /> Filtros
+                  </span>
+                  {[
+                    { key: 'subsistema', label: 'Subsistema', opts: ['DAT', 'CCTV', 'RAD', 'TEL', 'GEO', 'FO', 'WIFI'].map(v => ({ v, l: v })) },
+                    { key: 'tipo', label: 'Tipo', opts: [{ v: 'Incidente', l: 'Incidente' }, { v: 'Requerimiento', l: 'Requerimiento' }] },
+                    { key: 'origen', label: 'Origen', opts: [{ v: 'IM', l: 'Interior Mina' }, { v: 'SUP', l: 'Superficie' }] },
+                  ].map(f => (
+                    <select
+                      key={f.key}
+                      value={(filters as any)[f.key] || ''}
+                      onChange={e => setFilters(prev => ({ ...prev, [f.key]: e.target.value || undefined }))}
+                      className="bg-gray-50 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 dark:text-white outline-none cursor-pointer hover:border-gray-300 dark:hover:border-slate-600 font-medium"
+                    >
+                      <option value="">{f.label}: Todos</option>
+                      {f.opts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                    </select>
+                  ))}
+                  {(filters.subsistema || filters.tipo || filters.origen) && (
+                    <button onClick={() => setFilters({})} className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline px-2">Limpiar</button>
+                  )}
+                  <span className="ml-auto text-[11px] text-gray-400 dark:text-slate-500 font-medium px-1">
+                    {dashboardData ? dashboardData.totalTasks.toLocaleString() : '--'} tareas
+                  </span>
+                </div>
 
+                {dashboardData ? (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                    {/* ===== RESUMEN ===== */}
+                    {activeTab === 'dashboard' && (
                       <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">Tendencia Mensual de Tareas</h3>
@@ -500,7 +567,8 @@ export default function Home() {
                           </ResponsiveContainer>
                         </div>
                       </div>
-
+                    )}
+                    {activeTab === 'dashboard' && (
                       <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4 flex flex-col justify-between">
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">Tareas por Subsistema</h3>
@@ -538,11 +606,136 @@ export default function Home() {
                           ))}
                         </div>
                       </div>
-                    </div>
+                    )}
 
-                    {/* Row 2: Top Insumos + Hot Zones */}
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* ===== PRODUCTIVIDAD (Tiempo / Horas-Hombre) ===== */}
+                    {activeTab === 'productividad' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                        <div className="flex justify-between items-start gap-3">
+                          <div>
+                            <h3 className="text-sm font-bold text-gray-900 dark:text-white">Horas-Hombre por Causa Raíz</h3>
+                            <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">HH = personas × tiempo · dónde se concentra el esfuerzo</p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="block text-2xl font-extrabold text-gray-900 dark:text-white tracking-tight">{dashboardData.totalHH?.toLocaleString()}</span>
+                            <span className="text-[10px] text-gray-400 dark:text-slate-500 uppercase font-semibold">HH totales</span>
+                          </div>
+                        </div>
+                        <div className="h-72 w-full">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={dashboardData.hhPorCausa} layout="vertical">
+                              <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} horizontal={false} />
+                              <XAxis type="number" stroke={axisStroke} fontSize={11} tickLine={false} />
+                              <YAxis dataKey="name" type="category" stroke={axisStroke} fontSize={10} width={150} tickLine={false} />
+                              <Tooltip contentStyle={tooltipStyle} />
+                              <Bar dataKey="hh" name="Horas-Hombre" fill="#8b5cf6" radius={[0, 6, 6, 0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                    )}
+                    {activeTab === 'productividad' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white">HH por Nivel</h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Esfuerzo por profundidad de mina</p>
+                        </div>
+                        <div className="space-y-2.5">
+                          {dashboardData.hhPorNivel.map((n: any) => {
+                            const maxN = dashboardData.hhPorNivel[0]?.hh || 1;
+                            return (
+                              <div key={n.name} className="space-y-1">
+                                <div className="flex justify-between text-xs">
+                                  <span className="font-semibold text-gray-700 dark:text-slate-200 truncate mr-2">{n.name}</span>
+                                  <span className="font-bold text-gray-800 dark:text-white shrink-0">{n.hh.toLocaleString()} HH</span>
+                                </div>
+                                <div className="h-1.5 w-full bg-gray-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                                  <div className="h-full bg-gradient-to-r from-teal-500 to-indigo-500 rounded-full" style={{ width: `${Math.max(4, (n.hh / maxN) * 100)}%` }} />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {activeTab === 'productividad' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                        <div className="flex justify-between items-start gap-3 flex-wrap">
+                          <div>
+                            <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                              Proyección de Carga de Trabajo
+                              {cargaPred && <span className="text-[9px] font-bold uppercase bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/20 px-1.5 py-0.5 rounded">ML</span>}
+                            </h3>
+                            <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">
+                              {cargaMetric === 'hh' ? 'Horas-Hombre' : 'Nº de tareas'} por mes · histórico (sólido) y proyección {cargaPred ? 'Holt-Winters' : 'baseline'} (punteado)
+                            </p>
+                          </div>
+                          <div className="flex bg-gray-100 dark:bg-slate-800 rounded-lg p-0.5 text-[11px] font-semibold shrink-0">
+                            {(['hh', 'tareas'] as const).map(m => (
+                              <button key={m} onClick={() => setCargaMetric(m)}
+                                className={`px-2.5 py-1 rounded-md transition-colors ${cargaMetric === m ? 'bg-white dark:bg-slate-700 text-violet-600 dark:text-violet-300 shadow-sm' : 'text-gray-500 dark:text-slate-400'}`}>
+                                {m === 'hh' ? 'HH' : 'Tareas'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="h-72 w-full">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={cargaPred || dashboardData.cargaProyeccion}>
+                              <defs>
+                                <linearGradient id="colorHH" x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.2}/>
+                                  <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/>
+                                </linearGradient>
+                              </defs>
+                              <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                              <XAxis dataKey="month" stroke={axisStroke} fontSize={11} tickLine={false} />
+                              <YAxis stroke={axisStroke} fontSize={11} tickLine={false} />
+                              <Tooltip contentStyle={tooltipStyle} />
+                              <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                              <Area type="monotone" name="Histórico" dataKey={cargaMetric} stroke="#8b5cf6" fillOpacity={1} fill="url(#colorHH)" strokeWidth={2} connectNulls />
+                              <Area type="monotone" name="Proyectado" dataKey={cargaMetric === 'hh' ? 'hhProy' : 'tareasProy'} stroke="#14b8a6" strokeDasharray="5 5" fill="none" strokeWidth={2} connectNulls />
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                    )}
+                    {activeTab === 'productividad' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white">Materiales por Actividad</h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Cada actividad = bloque de filas (cabecera + sus materiales)</p>
+                        </div>
+                        <div className="space-y-3">
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20">
+                              <span className="block text-2xl font-extrabold text-indigo-700 dark:text-indigo-300">{dashboardData.materialesResumen.actividades.toLocaleString()}</span>
+                              <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 uppercase">Actividades</span>
+                            </div>
+                            <div className="p-3 rounded-xl bg-teal-50 dark:bg-teal-500/10 border border-teal-200 dark:border-teal-500/20">
+                              <span className="block text-2xl font-extrabold text-teal-700 dark:text-teal-300">{dashboardData.materialesResumen.lineasMaterial.toLocaleString()}</span>
+                              <span className="text-[11px] font-semibold text-teal-600 dark:text-teal-400 uppercase">Líneas de material</span>
+                            </div>
+                          </div>
+                          <div className="p-3 rounded-xl bg-gray-50 dark:bg-slate-800/40 border border-gray-100 dark:border-slate-800 flex justify-between items-center">
+                            <span className="text-xs font-medium text-gray-500 dark:text-slate-400">Prom. materiales / actividad</span>
+                            <span className="text-lg font-extrabold text-gray-800 dark:text-white">{dashboardData.materialesResumen.promPorActividad}</span>
+                          </div>
+                          <div className="p-3 rounded-xl bg-gray-50 dark:bg-slate-800/40 border border-gray-100 dark:border-slate-800">
+                            <div className="flex justify-between items-center mb-1.5">
+                              <span className="text-xs font-medium text-gray-500 dark:text-slate-400">Actividades con material</span>
+                              <span className="text-xs font-bold text-gray-800 dark:text-white">{dashboardData.materialesResumen.pctConMaterial}%</span>
+                            </div>
+                            <div className="h-1.5 w-full bg-gray-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                              <div className="h-full bg-gradient-to-r from-teal-500 to-indigo-500 rounded-full" style={{ width: `${dashboardData.materialesResumen.pctConMaterial}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
+                    {/* ===== INVENTARIO (Suministros / Mermas) ===== */}
+                    {activeTab === 'inventario' && (
                       <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">Top 8 Insumos Consumidos</h3>
@@ -564,7 +757,105 @@ export default function Home() {
                           </ResponsiveContainer>
                         </div>
                       </div>
+                    )}
+                    {activeTab === 'inventario' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white">Mermas · Consumo por HH</h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Intensidad de consumo, no total bruto</p>
+                        </div>
+                        <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                          {dashboardData.mermas.length === 0 ? (
+                            <p className="text-xs text-gray-400 dark:text-slate-500 text-center py-8">Sin datos suficientes.</p>
+                          ) : dashboardData.mermas.map((m: any) => (
+                            <div key={m.name} className="flex justify-between items-center p-2.5 rounded-lg bg-gray-50 dark:bg-slate-800/40 border border-gray-100 dark:border-slate-800 text-xs">
+                              <span className="font-semibold text-gray-700 dark:text-slate-200 truncate mr-2">{m.name}</span>
+                              <span className="font-bold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-500/15 shrink-0">{m.porHH} /HH</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
+                    {activeTab === 'inventario' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-3 space-y-4">
+                        <div className="flex justify-between items-start gap-3 flex-wrap">
+                          <div>
+                            <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                              Predicción de Demanda de Insumos
+                              <span className="text-[9px] font-bold uppercase bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/20 px-1.5 py-0.5 rounded">ML</span>
+                            </h3>
+                            <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Consumo histórico y proyección (Holt-Winters) · vía microservicio FastAPI</p>
+                          </div>
+                          <select value={selectedInsumo} onChange={e => setSelectedInsumo(e.target.value)}
+                            className="bg-gray-50 dark:bg-slate-800/80 border border-gray-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs text-gray-700 dark:text-white outline-none cursor-pointer hover:border-gray-300 dark:hover:border-slate-600 font-medium max-w-[240px]">
+                            {(dashboardData.insumoNames || []).slice(0, 50).map((n: string) => <option key={n} value={n}>{n}</option>)}
+                          </select>
+                        </div>
+                        <div className="h-72 w-full">
+                          {insumoPredLoading ? (
+                            <div className="h-full flex items-center justify-center text-gray-400 dark:text-slate-500 text-sm gap-2"><Activity className="h-5 w-5 animate-spin text-teal-500" /> Calculando predicción...</div>
+                          ) : (insumoPred && insumoPred.length > 0) ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={insumoPred}>
+                                <defs>
+                                  <linearGradient id="colorIns" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#2dd4bf" stopOpacity={0.25}/>
+                                    <stop offset="95%" stopColor="#2dd4bf" stopOpacity={0}/>
+                                  </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                                <XAxis dataKey="fecha" stroke={axisStroke} fontSize={11} tickLine={false} />
+                                <YAxis stroke={axisStroke} fontSize={11} tickLine={false} />
+                                <Tooltip contentStyle={tooltipStyle} />
+                                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                                <Area type="monotone" name="Consumo histórico" dataKey="cantidad" stroke="#2dd4bf" fillOpacity={1} fill="url(#colorIns)" strokeWidth={2} connectNulls />
+                                <Area type="monotone" name="Proyección" dataKey="cantidadProy" stroke="#f59e0b" strokeDasharray="5 5" fill="none" strokeWidth={2} connectNulls />
+                              </AreaChart>
+                            </ResponsiveContainer>
+                          ) : (
+                            <div className="h-full flex items-center justify-center text-gray-400 dark:text-slate-500 text-sm text-center px-6">
+                              Sin histórico suficiente para <strong className="mx-1">{selectedInsumo}</strong> (o microservicio no disponible).
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ===== MANTENIMIENTO (Zonas calientes / Causa→Detalle) ===== */}
+                    {activeTab === 'mantenimiento' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white">Causa Raíz → Detalle</h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Jerarquía de análisis: del motivo general al detalle específico</p>
+                        </div>
+                        <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                          {dashboardData.causaDetalle.map((c: any) => {
+                            const maxDet = c.detalles[0]?.value || 1;
+                            return (
+                              <div key={c.name} className="rounded-xl bg-gray-50 dark:bg-slate-800/40 border border-gray-100 dark:border-slate-800 p-3 space-y-2">
+                                <div className="flex justify-between items-center gap-2">
+                                  <span className="text-xs font-bold text-gray-800 dark:text-white">{c.name}</span>
+                                  <span className="text-[10px] font-semibold text-gray-500 dark:text-slate-400 shrink-0">{c.total} tareas · {c.hh.toLocaleString()} HH</span>
+                                </div>
+                                <div className="space-y-1 pl-2 border-l-2 border-teal-200 dark:border-teal-500/30">
+                                  {c.detalles.map((d: any) => (
+                                    <div key={d.name} className="flex items-center gap-2">
+                                      <span className="text-[11px] text-gray-600 dark:text-slate-300 truncate flex-1">{d.name}</span>
+                                      <div className="h-1.5 w-20 bg-gray-100 dark:bg-slate-800 rounded-full overflow-hidden shrink-0">
+                                        <div className="h-full bg-teal-500 rounded-full" style={{ width: `${Math.max(6, (d.value / maxDet) * 100)}%` }} />
+                                      </div>
+                                      <span className="text-[10px] font-bold text-gray-500 dark:text-slate-400 w-6 text-right shrink-0">{d.value}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {activeTab === 'mantenimiento' && (
                       <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">Zonas Calientes</h3>
@@ -589,8 +880,73 @@ export default function Home() {
                           ))}
                         </div>
                       </div>
-                    </div>
-                  </>
+                    )}
+                    {activeTab === 'mantenimiento' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                            <AlertTriangle className="h-4 w-4 text-amber-500" /> Riesgo de Falla por Zona
+                            <span className="text-[9px] font-bold uppercase bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/20 px-1.5 py-0.5 rounded">ML</span>
+                          </h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Prioridad de mantenimiento preventivo (incidentes por nivel/zona) · vía microservicio</p>
+                        </div>
+                        <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                          {(!riesgoZonas || riesgoZonas.length === 0) ? (
+                            <p className="text-xs text-gray-400 dark:text-slate-500 text-center py-8">Sin datos del microservicio (¿está activo?).</p>
+                          ) : riesgoZonas.slice(0, 12).map((z: any, i: number) => {
+                            const st = z.nivel_riesgo === 'Crítico'
+                              ? { bar: 'bg-rose-500', badge: 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-500/20' }
+                              : z.nivel_riesgo === 'Alto'
+                              ? { bar: 'bg-amber-500', badge: 'bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-500/20' }
+                              : z.nivel_riesgo === 'Medio'
+                              ? { bar: 'bg-yellow-500', badge: 'bg-yellow-50 dark:bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-200 dark:border-yellow-500/20' }
+                              : { bar: 'bg-emerald-500', badge: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-500/20' };
+                            return (
+                              <div key={`${z.nivel}-${z.zona}-${i}`} className="flex items-center gap-3 p-2.5 rounded-lg bg-gray-50 dark:bg-slate-800/40 border border-gray-100 dark:border-slate-800">
+                                <span className="text-[10px] font-bold text-gray-400 dark:text-slate-500 w-5 text-right shrink-0">{i + 1}</span>
+                                <div className="flex flex-col min-w-0 flex-1">
+                                  <span className="text-xs font-semibold text-gray-800 dark:text-white truncate">{z.nivel} · {z.zona}</span>
+                                  <span className="text-[10px] text-gray-400 dark:text-slate-500">{z.total_fallas} fallas · {z.fallas_recientes} recientes</span>
+                                </div>
+                                <div className="h-1.5 w-24 bg-gray-100 dark:bg-slate-800 rounded-full overflow-hidden shrink-0">
+                                  <div className={`h-full rounded-full ${st.bar}`} style={{ width: `${Math.max(4, z.risk_score)}%` }} />
+                                </div>
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 w-16 text-center border ${st.badge}`}>{z.nivel_riesgo}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {activeTab === 'mantenimiento' && dashboardData.sla && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                            <ShieldCheck className="h-4 w-4 text-teal-500" /> Cumplimiento ANS
+                          </h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">% de tareas dentro del objetivo de horas (col. Tiempo)</p>
+                        </div>
+                        <div className="text-center py-1">
+                          <span className="text-4xl font-extrabold text-teal-600 dark:text-teal-400">{dashboardData.sla.pct}%</span>
+                          <span className="block text-[11px] text-gray-400 dark:text-slate-500 mt-0.5">{dashboardData.sla.cumple.toLocaleString()} / {dashboardData.sla.total.toLocaleString()} tareas</span>
+                        </div>
+                        <div className="space-y-2.5">
+                          {dashboardData.sla.porTipo.map((s: any) => (
+                            <div key={s.tipo} className="space-y-1">
+                              <div className="flex justify-between text-xs">
+                                <span className="font-semibold text-gray-700 dark:text-slate-200">{s.tipo} <span className="text-gray-400 dark:text-slate-500 font-normal">(≤{s.objetivo}h)</span></span>
+                                <span className="font-bold text-gray-800 dark:text-white">{s.pct}%</span>
+                              </div>
+                              <div className="h-1.5 w-full bg-gray-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                                <div className="h-full bg-gradient-to-r from-teal-500 to-indigo-500 rounded-full" style={{ width: `${s.pct}%` }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
                 ) : (
                   <div className="h-96 flex items-center justify-center bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl">
                     <div className="flex flex-col items-center gap-3">
@@ -899,112 +1255,6 @@ export default function Home() {
                       </div>
                     </div>
                   )}
-                </div>
-              </div>
-            )}
-
-            {/* ========== SUPABASE TAB ========== */}
-            {activeTab === 'supabase' && (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-
-                <div className="lg:col-span-2 space-y-6">
-
-                  {/* Infrastructure Status */}
-                  <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-5 relative overflow-hidden">
-                    <div className="absolute right-0 top-0 translate-x-1/3 -translate-y-1/3 opacity-[0.03]">
-                      <Server className="h-44 w-44" />
-                    </div>
-
-                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Estado del Aprovisionamiento</h3>
-                    <p className="text-xs text-gray-500 dark:text-slate-400 leading-relaxed max-w-2xl">
-                      El ERP opera en <strong className="text-amber-600 dark:text-amber-400">Modo Demo Offline</strong> leyendo el archivo Excel local. La estructura SQL y scripts de migración están listos para producción.
-                    </p>
-
-                    <div className="pt-2 space-y-4">
-                      <div className="flex gap-3 items-start">
-                        <span className="h-7 w-7 rounded-full bg-teal-50 dark:bg-teal-500/10 border border-teal-200 dark:border-teal-500/30 flex items-center justify-center shrink-0 mt-0.5">
-                          <CheckCircle2 className="h-4 w-4 text-teal-500 dark:text-teal-400" />
-                        </span>
-                        <div>
-                          <h4 className="text-xs font-bold text-gray-800 dark:text-white">Análisis y Limpieza del Excel</h4>
-                          <p className="text-[11px] text-gray-500 dark:text-slate-400 mt-0.5">Mapeo del patrón padre-hijo, limpieza fuzzy de 114 insumos y extracción de 799 ubicaciones.</p>
-                        </div>
-                      </div>
-
-                      <div className="flex gap-3 items-start">
-                        <span className="h-7 w-7 rounded-full bg-teal-50 dark:bg-teal-500/10 border border-teal-200 dark:border-teal-500/30 flex items-center justify-center shrink-0 mt-0.5">
-                          <CheckCircle2 className="h-4 w-4 text-teal-500 dark:text-teal-400" />
-                        </span>
-                        <div>
-                          <h4 className="text-xs font-bold text-gray-800 dark:text-white">Script de Ingesta SQL Generado</h4>
-                          <p className="text-[11px] text-gray-500 dark:text-slate-400 mt-0.5">
-                            Archivo SQL transaccional <code className="text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-900/30 px-1.5 py-0.5 rounded text-[10px]">supabase/migration_data.sql</code> con claves UUID estables.
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex gap-3 items-start">
-                        <span className="h-7 w-7 rounded-full bg-gray-100 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 flex items-center justify-center shrink-0 mt-0.5">
-                          <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
-                        </span>
-                        <div>
-                          <h4 className="text-xs font-bold text-amber-600 dark:text-amber-400">Aprovisionamiento Supabase Cloud</h4>
-                          <p className="text-[11px] text-gray-500 dark:text-slate-400 mt-0.5">Pendiente: crear proyecto, ejecutar esquema y cargar datos migrados.</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* SQL Instructions */}
-                  <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
-                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Cómo cargar los datos en Supabase</h3>
-                    <ol className="text-xs text-gray-600 dark:text-slate-300 space-y-3 list-decimal list-inside leading-relaxed">
-                      <li>Inicia sesión en <strong className="text-gray-800 dark:text-white">Supabase</strong> y crea tu proyecto.</li>
-                      <li>Ve al menú <strong className="text-gray-800 dark:text-white">SQL Editor</strong> en el panel izquierdo.</li>
-                      <li>
-                        Ejecuta el archivo <code className="text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-900/30 px-1.5 py-0.5 rounded text-[10px]">supabase/migrations/0001_initial_schema.sql</code> para crear las tablas.
-                      </li>
-                      <li>
-                        Ejecuta <code className="text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-900/30 px-1.5 py-0.5 rounded text-[10px]">supabase/seed.sql</code> para cargar catálogos.
-                      </li>
-                      <li>
-                        Ejecuta <code className="text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-900/30 px-1.5 py-0.5 rounded text-[10px]">supabase/migration_data.sql</code> para poblar las 2,277 tareas e insumos.
-                      </li>
-                    </ol>
-                  </div>
-                </div>
-
-                {/* Files Panel */}
-                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-5 shadow-sm dark:shadow-none">
-                  <div>
-                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Archivos Locales</h3>
-                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-1">SQL y scripts listos para despliegue</p>
-                  </div>
-
-                  <div className="space-y-2.5">
-                    {[
-                      { label: 'Esquema Base', file: '0001_initial_schema.sql', path: 'supabase/migrations/', highlight: false },
-                      { label: 'Catálogos', file: 'seed.sql', path: 'supabase/', highlight: false },
-                      { label: 'Datos Migrados', file: 'migration_data.sql', path: 'supabase/', highlight: true },
-                      { label: 'Migrador Python', file: 'ingest.py', path: 'scripts/', highlight: false },
-                    ].map(item => (
-                      <div key={item.file} className="p-3 bg-gray-50 dark:bg-slate-800/40 border border-gray-100 dark:border-slate-700/30 rounded-xl space-y-1">
-                        <span className="text-[10px] text-gray-400 dark:text-slate-500 uppercase font-bold tracking-wider block">{item.label}</span>
-                        <span className={`text-xs font-semibold block truncate ${item.highlight ? 'text-teal-600 dark:text-teal-400' : 'text-gray-700 dark:text-slate-200'}`}>{item.file}</span>
-                        <span className="text-[10px] text-gray-400 dark:text-slate-500 block">{item.path}{item.file}</span>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="p-4 bg-teal-50 dark:bg-teal-500/5 border border-teal-200 dark:border-teal-500/10 rounded-xl flex gap-3 items-start">
-                    <AlertCircle className="h-5 w-5 text-teal-600 dark:text-teal-400 shrink-0 mt-0.5" />
-                    <div className="space-y-1">
-                      <span className="text-xs font-bold text-gray-800 dark:text-white block">Siguiente Paso</span>
-                      <span className="text-[11px] text-gray-500 dark:text-slate-400 block leading-relaxed">
-                        Configura Supabase para habilitar sincronización en tiempo real y la PWA offline.
-                      </span>
-                    </div>
-                  </div>
                 </div>
               </div>
             )}

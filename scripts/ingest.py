@@ -336,7 +336,8 @@ def main():
                     'nivel': nivel,
                     'zona': zona,
                     'punto': punto,
-                    'texto_original': ubic_text
+                    # Nunca NULL: si la celda Ubicación venía vacía, usar marcador
+                    'texto_original': ubic_text if (isinstance(ubic_text, str) and ubic_text.strip()) else 'Sin ubicacion'
                 }
             
             # Procesar Causa Raíz
@@ -363,7 +364,8 @@ def main():
             fecha_fin = row['Fecha Fin']
             periodo = row['Periodo']
             
-            fecha_inc_str = fecha_inc.strftime('%Y-%m-%d %H:%M:%S%z') if isinstance(fecha_inc, pd.Timestamp) else str(fecha_inc)
+            # NaT / vacío -> None (se emitirá NULL), nunca la cadena 'NaT'
+            fecha_inc_str = fecha_inc.strftime('%Y-%m-%d %H:%M:%S%z') if isinstance(fecha_inc, pd.Timestamp) else None
             fecha_fin_str = fecha_fin.strftime('%Y-%m-%d %H:%M:%S%z') if isinstance(fecha_fin, pd.Timestamp) else None
             periodo_str = periodo.strftime('%Y-%m-%d') if isinstance(periodo, pd.Timestamp) else None
             
@@ -489,7 +491,7 @@ def main():
             # Rellenar con 'Cerrada' por defecto
             f.write(f"INSERT INTO tarea (id, unidad_minera_id, ticket, tipo_id, area_id, origen_id, ubicacion_id, causa_raiz_id, cant_personas, tiempo_horas, fecha_inicio, fecha_fin, periodo, detalle, trabajo_realizado, estado) VALUES "
                     f"('{t['id']}', '{UNIDAD_MINERA_ID}', {escape_sql(t['ticket'])}, '{t['tipo_id']}', '{t['area_id']}', '{t['origen_id']}', '{t['ubicacion_id']}', "
-                    f"'{t['causa_raiz_id']}', {t['cant_personas']}, {t['tiempo_horas']}, '{t['fecha_inicio']}', {escape_sql(t['fecha_fin'])}, {escape_sql(t['periodo'])}, "
+                    f"'{t['causa_raiz_id']}', {t['cant_personas']}, {t['tiempo_horas']}, {escape_sql(t['fecha_inicio'])}, {escape_sql(t['fecha_fin'])}, {escape_sql(t['periodo'])}, "
                     f"{escape_sql(t['detalle'])}, {escape_sql(t['trabajo_realizado'])}, 'Cerrada');\n")
         f.write("\n")
         

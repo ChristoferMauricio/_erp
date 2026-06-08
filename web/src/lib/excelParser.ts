@@ -7,6 +7,9 @@ export interface InsumoConsumo {
   name: string;
   cantidad: number;
   unidad: string;
+  // true  = fila de solo-insumo (patrón "entrega de material": sin Causa Raíz/personal/tiempo)
+  // false = insumo consumido en la misma fila de la actividad de ejecución
+  esLineaSeparada: boolean;
 }
 
 export interface UbicacionParsed {
@@ -26,6 +29,7 @@ export interface TareaParsed {
   causa_raiz: string;
   cant_personas: number;
   tiempo_horas: number;
+  horas_hombre: number; // cant_personas * tiempo_horas (RF-11)
   fecha_inicio: string;
   fecha_fin: string | null;
   periodo: string | null;
@@ -274,9 +278,14 @@ export function getExcelData(): TareaParsed[] {
       // Encontrar columna Ubicación dinámicamente
       const ubicKey = Object.keys(row).find(k => k.includes('Ubic')) || 'Ubicacion';
       
-      const isParent = row['Cant. Person'] !== null || 
-                       row['Tiempo'] !== null || 
-                       row[ubicKey] !== null || 
+      // Una fila es "cabecera" (actividad de ejecución) si trae cualquiera de los
+      // campos propios de la ejecución. Se incluye Causa Raíz/Tipo para blindar la
+      // atribución: una fila con Causa Raíz SIEMPRE es cabecera, nunca línea-hija.
+      const isParent = row['Cant. Person'] !== null ||
+                       row['Tiempo'] !== null ||
+                       row[ubicKey] !== null ||
+                       row['Causa Raiz'] !== null ||
+                       row['Tipo'] !== null ||
                        row['Detalle'] !== null;
                        
       // Saltar vacíos
@@ -323,6 +332,9 @@ export function getExcelData(): TareaParsed[] {
           causa_raiz: causa,
           cant_personas: row['Cant. Person'] !== null ? Number(row['Cant. Person']) : 0,
           tiempo_horas: row['Tiempo'] !== null ? Number(row['Tiempo']) : 0,
+          horas_hombre:
+            (row['Cant. Person'] !== null ? Number(row['Cant. Person']) : 0) *
+            (row['Tiempo'] !== null ? Number(row['Tiempo']) : 0),
           fecha_inicio: fechaInicioStr,
           fecha_fin: fechaFinStr,
           periodo: periodoStr,
@@ -360,7 +372,8 @@ export function getExcelData(): TareaParsed[] {
           currentTask.insumos.push({
             name: insNorm,
             cantidad: qty,
-            unidad: unit
+            unidad: unit,
+            esLineaSeparada: !isParent
           });
         }
       }

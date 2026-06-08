@@ -6,8 +6,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    # En local sin psycopg2 el servicio funciona en modo Excel (misma data).
+    psycopg2 = None
+    RealDictCursor = None
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 app = FastAPI(
@@ -30,7 +35,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 LOCAL_EXCEL_PATH = r"d:\OneDrive_UNI\OneDrive - UNIVERSIDAD NACIONAL DE INGENIERIA\Documents\ESCRITORIO\Cris\2026\2026-1\9 Emprendimiento\_erp\Yauricocha - CORONA.xlsx"
 
 def get_connection():
-    if DATABASE_URL:
+    if DATABASE_URL and psycopg2 is not None:
         return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return None
 
@@ -166,6 +171,98 @@ def predict_insumos(insumo_nombre: Optional[str] = None, meses_proyeccion: int =
     return {
         "meses_proyeccion": meses_proyeccion,
         "predictions": predictions
+    }
+
+@app.get("/predict/carga")
+def predict_carga(meses_proyeccion: int = 3):
+    """
+    Predice la carga de trabajo por mes: Horas-Hombre (HH = cant_personas * tiempo_horas)
+    y número de tareas. Usa Holt-Winters con respaldo a media/baseline cuando el
+    histórico es corto. Cierra el RF-18 (predicción de carga de trabajo).
+    """
+    df = None
+    if DATABASE_URL:
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT to_char(periodo, 'YYYY-MM') AS month,
+                       SUM(COALESCE(cant_personas, 0) * COALESCE(tiempo_horas, 0)) AS hh,
+                       COUNT(*) AS tareas
+                FROM tarea
+                WHERE periodo IS NOT NULL
+                GROUP BY 1
+                ORDER BY 1
+            """)
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            if rows:
+                df = pd.DataFrame(rows)
+        except Exception as e:
+            print(f"Error cargando carga de Supabase, usando Excel: {e}")
+
+    # Fallback Excel local
+    if df is None or len(df) == 0:
+        df_excel = load_data_from_excel()
+        if df_excel is None:
+            raise HTTPException(status_code=500, detail="No se encontraron fuentes de datos disponibles.")
+        d = df_excel.copy()
+        # Solo actividades de ejecución (las que tienen Tiempo registrado)
+        d = d[d['Tiempo'].notna()]
+        personas = pd.to_numeric(d['Cant. Person'], errors='coerce').fillna(0)
+        tiempo = pd.to_numeric(d['Tiempo'], errors='coerce').fillna(0)
+        d = d.assign(hh=personas.values * tiempo.values)
+        d['month'] = pd.to_datetime(d['Periodo']).dt.to_period('M').dt.to_timestamp()
+        g = d.groupby('month').agg(hh=('hh', 'sum'), tareas=('hh', 'size')).reset_index()
+        df = pd.DataFrame({
+            'month': g['month'].dt.strftime('%Y-%m'),
+            'hh': g['hh'],
+            'tareas': g['tareas']
+        })
+
+    df = df.sort_values('month')
+    df['hh'] = pd.to_numeric(df['hh'], errors='coerce').fillna(0.0)
+    df['tareas'] = pd.to_numeric(df['tareas'], errors='coerce').fillna(0).astype(int)
+
+    def _forecast(values, meses):
+        vals = [float(v) for v in values]
+        n = len(vals)
+        if n == 0:
+            return [0.0] * meses
+        if n < 3:
+            media = sum(vals) / n
+            return [max(0.0, media)] * meses
+        try:
+            idx = pd.date_range('2000-01-01', periods=n, freq='MS')
+            serie = pd.Series(vals, index=idx)
+            model = ExponentialSmoothing(serie, trend='add', seasonal=None, initialization_method="estimated")
+            fit = model.fit()
+            fc = fit.forecast(meses)
+            return [max(0.0, float(x)) for x in fc.values]
+        except Exception:
+            media = sum(vals) / n
+            return [max(0.0, media)] * meses
+
+    if len(df) == 0:
+        return {"meses_proyeccion": meses_proyeccion, "historico": [], "proyeccion": [], "message": "Sin histórico."}
+
+    hh_fc = _forecast(df['hh'].tolist(), meses_proyeccion)
+    tareas_fc = _forecast(df['tareas'].tolist(), meses_proyeccion)
+
+    last_month = pd.to_datetime(str(df['month'].iloc[-1]) + '-01')
+    future = [(last_month + pd.DateOffset(months=i + 1)).strftime('%Y-%m') for i in range(meses_proyeccion)]
+
+    return {
+        "meses_proyeccion": meses_proyeccion,
+        "historico": [
+            {"month": str(r['month']), "hh": round(float(r['hh']), 1), "tareas": int(r['tareas'])}
+            for _, r in df.iterrows()
+        ],
+        "proyeccion": [
+            {"month": future[i], "hh": round(hh_fc[i], 1), "tareas": int(round(tareas_fc[i]))}
+            for i in range(meses_proyeccion)
+        ]
     }
 
 @app.get("/predict/mantenimiento")
