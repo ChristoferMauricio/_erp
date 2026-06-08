@@ -6,13 +6,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+import ssl as ssl_module
 try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
+    import pg8000.dbapi
 except ImportError:
-    # En local sin psycopg2 el servicio funciona en modo Excel (misma data).
-    psycopg2 = None
-    RealDictCursor = None
+    pg8000 = None
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 app = FastAPI(
@@ -35,9 +33,36 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 LOCAL_EXCEL_PATH = r"d:\OneDrive_UNI\OneDrive - UNIVERSIDAD NACIONAL DE INGENIERIA\Documents\ESCRITORIO\Cris\2026\2026-1\9 Emprendimiento\_erp\Yauricocha - CORONA.xlsx"
 
 def get_connection():
-    if DATABASE_URL and psycopg2 is not None:
-        return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    return None
+    """Conexión a la BD vía pg8000 (puro Python; SSL para Supabase)."""
+    if not DATABASE_URL or pg8000 is None:
+        return None
+    m = re.match(r"postgres(?:ql)?://(?P<user>[^:]+):(?P<password>[^@]+)@(?P<host>[^:/]+)(?::(?P<port>\d+))?/(?P<database>[^?]+)", DATABASE_URL)
+    if not m:
+        return None
+    p = m.groupdict()
+    ctx = ssl_module.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl_module.CERT_NONE
+    return pg8000.dbapi.connect(
+        user=p['user'], password=p['password'], host=p['host'],
+        port=int(p['port']) if p['port'] else 5432,
+        database=p['database'], ssl_context=ctx
+    )
+
+def query_df(sql, params=None):
+    """Ejecuta SQL en la BD y devuelve un DataFrame con columnas correctas. None si no hay BD."""
+    conn = get_connection()
+    if conn is None:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params or [])
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        cur.close()
+        return pd.DataFrame(rows, columns=cols)
+    finally:
+        conn.close()
 
 def load_data_from_excel():
     """Fallback para desarrollo local si no hay Supabase aún."""
@@ -70,29 +95,23 @@ def predict_insumos(insumo_nombre: Optional[str] = None, meses_proyeccion: int =
     utilizando Suavizado Exponencial de Holt-Winters o regresión lineal simple.
     """
     df = None
-    # 1. Intentar cargar datos de Supabase si hay conexión
+    # 1. Intentar cargar datos de la BD (Supabase) si hay conexión
     if DATABASE_URL:
         try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            query = """
-                SELECT t.periodo, ti.cantidad, i.nombre_normalizado as insumo
+            sql = """
+                SELECT t.periodo, ti.cantidad, i.nombre_normalizado AS insumo
                 FROM tarea_insumo ti
                 JOIN tarea t ON ti.tarea_id = t.id
                 JOIN insumo i ON ti.insumo_id = i.id
                 WHERE t.periodo IS NOT NULL
             """
+            params = []
             if insumo_nombre:
-                query += f" AND i.nombre_normalizado = {psycopg2.extensions.adapt(insumo_nombre)}"
-            
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            if rows:
-                df = pd.DataFrame(rows)
-                # Normalizar nombres de columnas para que coincidan con la lógica siguiente
-                df.rename(columns={'periodo': 'Periodo', 'cantidad': 'CANTIDAD', 'insumo': 'INSUMO'}, inplace=True)
+                sql += " AND i.nombre_normalizado = %s"
+                params.append(insumo_nombre)
+            df_db = query_df(sql, params)
+            if df_db is not None and len(df_db) > 0:
+                df = df_db.rename(columns={'periodo': 'Periodo', 'cantidad': 'CANTIDAD', 'insumo': 'INSUMO'})
         except Exception as e:
             print(f"Error cargando de Supabase, usando Excel: {e}")
             
@@ -183,9 +202,7 @@ def predict_carga(meses_proyeccion: int = 3):
     df = None
     if DATABASE_URL:
         try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            df_db = query_df("""
                 SELECT to_char(periodo, 'YYYY-MM') AS month,
                        SUM(COALESCE(cant_personas, 0) * COALESCE(tiempo_horas, 0)) AS hh,
                        COUNT(*) AS tareas
@@ -194,11 +211,8 @@ def predict_carga(meses_proyeccion: int = 3):
                 GROUP BY 1
                 ORDER BY 1
             """)
-            rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            if rows:
-                df = pd.DataFrame(rows)
+            if df_db is not None and len(df_db) > 0:
+                df = df_db
         except Exception as e:
             print(f"Error cargando carga de Supabase, usando Excel: {e}")
 
@@ -274,24 +288,16 @@ def predict_mantenimiento(nivel: Optional[str] = None):
     df = None
     if DATABASE_URL:
         try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            query = """
-                SELECT t.fecha_inicio, t.tipo_id, u.nivel, u.zona, u.punto, c.nombre as causa_raiz
+            df_db = query_df("""
+                SELECT t.fecha_inicio, t.tipo_id, u.nivel, u.zona, u.punto, c.nombre AS causa_raiz
                 FROM tarea t
                 JOIN ubicacion u ON t.ubicacion_id = u.id
                 JOIN cat_causa_raiz c ON t.causa_raiz_id = c.id
                 JOIN cat_tipo ct ON t.tipo_id = ct.id
                 WHERE ct.nombre = 'Incidente'
-            """
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            if rows:
-                df = pd.DataFrame(rows)
-                # Normalizar columnas
-                df.rename(columns={'fecha_inicio': 'Fecha inic.', 'nivel': 'nivel', 'zona': 'zona', 'causa_raiz': 'Causa Raiz'}, inplace=True)
+            """)
+            if df_db is not None and len(df_db) > 0:
+                df = df_db.rename(columns={'fecha_inicio': 'Fecha inic.', 'causa_raiz': 'Causa Raiz'})
         except Exception as e:
             print(f"Error cargando de Supabase para fallas: {e}")
 

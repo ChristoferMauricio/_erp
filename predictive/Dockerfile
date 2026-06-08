@@ -16,4 +16,5 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Forma shell para que ${PORT} (que inyecta Render) se expanda; 8000 por defecto en local.
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

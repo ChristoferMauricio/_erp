@@ -1,0 +1,23 @@
+# ===== Python (microservicio) =====
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ===== Node / Next (el web/ ya tiene su propio .gitignore) =====
+node_modules/
+.next/
+out/
+
+# ===== Variables de entorno (NUNCA subir secretos) =====
+.env
+.env.local
+.env.*.local
+
+# ===== Datos / temporales =====
+~$*.xlsx
+_newbody.txt
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
