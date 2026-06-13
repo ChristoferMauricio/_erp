@@ -7,8 +7,11 @@ import {
   fetchTasks,
   fetchCargaPrediction,
   fetchInsumosPrediction,
-  fetchMantenimientoPrediction
+  fetchMantenimientoPrediction,
+  validarIngesta,
+  confirmarIngesta
 } from './actions';
+import * as XLSX from 'xlsx';
 import {
   Wrench,
   TrendingUp,
@@ -35,6 +38,7 @@ import {
   Filter,
   ShieldCheck,
   AlertTriangle,
+  UploadCloud,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -90,7 +94,7 @@ function inferSubsystem(cause: string | null | undefined): string {
 
 export default function Home() {
   const { theme, toggleTheme } = useTheme();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'productividad' | 'inventario' | 'mantenimiento' | 'tasks'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'productividad' | 'inventario' | 'mantenimiento' | 'ingesta' | 'tasks'>('dashboard');
   const [mounted, setMounted] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -115,6 +119,12 @@ export default function Home() {
   const [insumoPred, setInsumoPred] = useState<any[] | null>(null);
   const [insumoPredLoading, setInsumoPredLoading] = useState(false);
   const [riesgoZonas, setRiesgoZonas] = useState<any[] | null>(null);
+  // Ingesta mensual
+  const [ingestResult, setIngestResult] = useState<any>(null);
+  const [ingestLoading, setIngestLoading] = useState(false);
+  const [ingestCommit, setIngestCommit] = useState<any>(null);
+  const [ingestFileName, setIngestFileName] = useState<string>('');
+  const [dragOver, setDragOver] = useState(false);
 
   const [isPending, startTransition] = useTransition();
 
@@ -187,6 +197,44 @@ export default function Home() {
     }
   };
 
+  // ===== Ingesta mensual =====
+  const handleIngestFile = async (file: File) => {
+    setIngestCommit(null);
+    setIngestResult(null);
+    setIngestFileName(file.name);
+    setIngestLoading(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as any[];
+      // A objetos planos (las fechas Date -> string ISO) para pasarlas al server action
+      const plainRows = JSON.parse(JSON.stringify(rows));
+      const res = await validarIngesta(plainRows);
+      setIngestResult(res);
+    } catch {
+      setIngestResult({ ok: false, error: 'No se pudo leer el Excel.', activities: [] });
+    } finally {
+      setIngestLoading(false);
+    }
+  };
+
+  const toggleInclude = (idx: number) =>
+    setIngestResult((r: any) => r ? { ...r, activities: r.activities.map((a: any, i: number) => i === idx ? { ...a, include: !a.include } : a) } : r);
+
+  const applyCausaSuggestion = (idx: number, suggestion: string) =>
+    setIngestResult((r: any) => r ? { ...r, activities: r.activities.map((a: any, i: number) => i === idx ? { ...a, causa_raiz: suggestion, issues: (a.issues || []).filter((x: any) => x.field !== 'causa_raiz') } : a) } : r);
+
+  const doCommit = async () => {
+    if (!ingestResult) return;
+    setIngestLoading(true);
+    const included = ingestResult.activities.filter((a: any) => a.include);
+    const res = await confirmarIngesta(included);
+    setIngestCommit(res);
+    setIngestLoading(false);
+    if (res.ok) fetchDashboardData(filters).then(setDashboardData);
+  };
+
   const COLORS = ['#2dd4bf', '#3b82f6', '#8b5cf6', '#f59e0b', '#10b981', '#f97316', '#64748b'];
 
   const tooltipStyle = theme === 'dark'
@@ -201,6 +249,7 @@ export default function Home() {
     { id: 'productividad' as const, label: 'Productividad', icon: TrendingUp, desc: 'Tiempo y Horas-Hombre' },
     { id: 'inventario' as const, label: 'Inventario', icon: Boxes, desc: 'Suministros y mermas' },
     { id: 'mantenimiento' as const, label: 'Mantenimiento', icon: Activity, desc: 'Zonas calientes y causas' },
+    { id: 'ingesta' as const, label: 'Ingesta', icon: UploadCloud, desc: 'Cargar Excel del mes' },
     { id: 'tasks' as const, label: 'Tareas', icon: Wrench, desc: 'Registro de operaciones', badge: totalTasks },
   ];
 
@@ -209,6 +258,7 @@ export default function Home() {
     productividad: 'Productividad · Tiempo & HH',
     inventario: 'Inventario · Suministros',
     mantenimiento: 'Mantenimiento · Análisis',
+    ingesta: 'Ingesta de Datos',
     tasks: 'Registro de Tareas',
   };
 
@@ -954,6 +1004,140 @@ export default function Home() {
                       <p className="text-gray-500 dark:text-slate-400 text-sm font-medium">Procesando datos...</p>
                     </div>
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* ========== INGESTA TAB ========== */}
+            {activeTab === 'ingesta' && (
+              <div className="space-y-6">
+                <div className="bg-amber-50 dark:bg-amber-500/5 border border-amber-200 dark:border-amber-500/20 rounded-2xl p-4 flex gap-3 items-start">
+                  <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                    Sube el Excel del mes (mismo formato que el histórico). Se <strong>valida antes de insertar</strong>: puedes excluir filas con problemas. La inserción es <strong>idempotente</strong> (re-subir el mismo archivo no duplica).
+                  </p>
+                </div>
+
+                <div
+                  onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) handleIngestFile(f); }}
+                  onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
+                  className={`border-2 border-dashed rounded-2xl p-10 text-center transition-colors ${dragOver ? 'border-teal-500 bg-teal-50 dark:bg-teal-500/10' : 'border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900/80'}`}
+                >
+                  <UploadCloud className="h-10 w-10 mx-auto text-teal-500 mb-3" />
+                  <p className="text-sm font-semibold text-gray-800 dark:text-white">Arrastra el Excel del mes aquí</p>
+                  <label className="inline-block mt-3 cursor-pointer text-xs font-semibold text-teal-600 dark:text-teal-400 border border-teal-200 dark:border-teal-500/30 rounded-lg px-3 py-1.5 hover:bg-teal-50 dark:hover:bg-teal-500/10 transition-colors">
+                    o seleccionar archivo
+                    <input type="file" accept=".xlsx,.xls" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleIngestFile(f); }} />
+                  </label>
+                  {ingestFileName && <p className="text-[11px] text-gray-500 dark:text-slate-400 mt-3">Archivo: <strong className="text-gray-700 dark:text-slate-200">{ingestFileName}</strong></p>}
+                </div>
+
+                {ingestLoading && (
+                  <div className="flex items-center justify-center gap-2 text-sm text-gray-500 dark:text-slate-400 py-4">
+                    <Activity className="h-5 w-5 animate-spin text-teal-500" /> Procesando…
+                  </div>
+                )}
+
+                {ingestResult && !ingestResult.ok && (
+                  <div className="bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/20 rounded-2xl p-4 text-sm text-rose-700 dark:text-rose-300">
+                    {ingestResult.error}
+                  </div>
+                )}
+
+                {ingestResult && ingestResult.ok && (
+                  <>
+                    {ingestResult.columns && !ingestResult.columns.ok && (
+                      <div className="bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/20 rounded-xl p-3 text-xs text-rose-700 dark:text-rose-300">
+                        Faltan columnas esperadas: <strong>{ingestResult.columns.faltan.join(', ')}</strong>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {[
+                        { label: 'Total', value: ingestResult.summary?.total ?? 0, cls: 'text-gray-800 dark:text-white' },
+                        { label: 'OK', value: ingestResult.summary?.ok ?? 0, cls: 'text-emerald-600 dark:text-emerald-400' },
+                        { label: 'Advertencias', value: ingestResult.summary?.warn ?? 0, cls: 'text-amber-600 dark:text-amber-400' },
+                        { label: 'Con error', value: ingestResult.summary?.err ?? 0, cls: 'text-rose-600 dark:text-rose-400' },
+                      ].map((s) => (
+                        <div key={s.label} className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-4 text-center">
+                          <span className={`block text-2xl font-extrabold ${s.cls}`}>{s.value}</span>
+                          <span className="text-[11px] font-semibold text-gray-400 dark:text-slate-500 uppercase">{s.label}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl overflow-hidden">
+                      <div className="overflow-x-auto max-h-[520px]">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-800/40 sticky top-0">
+                              <th className="p-3 w-10"></th>
+                              <th className="p-3 font-semibold text-gray-500 dark:text-slate-400 uppercase">Fecha</th>
+                              <th className="p-3 font-semibold text-gray-500 dark:text-slate-400 uppercase">Ubicación</th>
+                              <th className="p-3 font-semibold text-gray-500 dark:text-slate-400 uppercase">Causa</th>
+                              <th className="p-3 font-semibold text-gray-500 dark:text-slate-400 uppercase text-center">P/H</th>
+                              <th className="p-3 font-semibold text-gray-500 dark:text-slate-400 uppercase text-center">Ins.</th>
+                              <th className="p-3 font-semibold text-gray-500 dark:text-slate-400 uppercase">Validación</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 dark:divide-slate-800/60">
+                            {ingestResult.activities.map((a: any, idx: number) => (
+                              <tr key={idx} className={a.include ? '' : 'opacity-40'}>
+                                <td className="p-3"><input type="checkbox" checked={!!a.include} onChange={() => toggleInclude(idx)} className="accent-teal-500" /></td>
+                                <td className="p-3 text-gray-700 dark:text-slate-300 whitespace-nowrap">{a.fecha_inicio || '—'}</td>
+                                <td className="p-3 text-gray-700 dark:text-slate-300">{a.nivel} · {a.zona}</td>
+                                <td className="p-3 font-medium text-gray-800 dark:text-white">{a.causa_raiz}</td>
+                                <td className="p-3 text-center text-gray-500 dark:text-slate-400 whitespace-nowrap">{a.cant_personas}p · {a.tiempo_horas}h</td>
+                                <td className="p-3 text-center text-gray-500 dark:text-slate-400">{(a.insumos || []).length}</td>
+                                <td className="p-3">
+                                  {(!a.issues || a.issues.length === 0) ? (
+                                    <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400">OK</span>
+                                  ) : (
+                                    <div className="flex flex-col gap-1">
+                                      {a.issues.map((iss: any, j: number) => (
+                                        <div key={j} className="flex items-center gap-1.5 flex-wrap">
+                                          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${iss.level === 'error' ? 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400' : 'bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400'}`}>{iss.msg}</span>
+                                          {iss.suggestion && iss.field === 'causa_raiz' && (
+                                            <button onClick={() => applyCausaSuggestion(idx, iss.suggestion)} className="text-[10px] font-semibold text-teal-600 dark:text-teal-400 underline">usar “{iss.suggestion}”</button>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
+                      <span className="text-xs text-gray-500 dark:text-slate-400">
+                        <strong className="text-gray-800 dark:text-white">{ingestResult.activities.filter((a: any) => a.include).length}</strong> actividades marcadas para insertar
+                      </span>
+                      <button
+                        onClick={doCommit}
+                        disabled={ingestLoading || ingestResult.activities.filter((a: any) => a.include).length === 0}
+                        className="bg-teal-600 hover:bg-teal-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl px-5 py-2.5 transition-colors"
+                      >
+                        Insertar data
+                      </button>
+                    </div>
+
+                    {ingestCommit && (
+                      ingestCommit.ok ? (
+                        <div className="bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 rounded-2xl p-4 text-sm text-emerald-700 dark:text-emerald-300">
+                          ✓ Insertadas: <strong>{ingestCommit.inserted}</strong> · Omitidas/duplicadas: <strong>{ingestCommit.skipped}</strong>
+                        </div>
+                      ) : (
+                        <div className="bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/20 rounded-2xl p-4 text-sm text-rose-700 dark:text-rose-300">
+                          {ingestCommit.error}
+                        </div>
+                      )
+                    )}
+                  </>
                 )}
               </div>
             )}

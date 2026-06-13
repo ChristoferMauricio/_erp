@@ -2,7 +2,7 @@ import os
 import re
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -12,6 +12,7 @@ try:
 except ImportError:
     pg8000 = None
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from app import ingest_core
 
 app = FastAPI(
     title="Servicio de Predicción ERP Minero",
@@ -382,6 +383,60 @@ def predict_mantenimiento(nivel: Optional[str] = None):
     return {
         "results": results
     }
+
+@app.post("/ingest/validate")
+def ingest_validate(payload: dict = Body(...)):
+    """Parsea las filas del Excel (modelo de bloque), valida (faltantes, duplicados,
+    categorías no reconocidas con sugerencias) y devuelve una vista previa."""
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    activities = ingest_core.parse_rows(rows)
+    columns = ingest_core.check_columns(rows)
+    catalogs = {"insumos": set(), "causas": set(), "unidades": set()}
+    existing = set()
+    conn = get_connection()
+    if conn is not None:
+        try:
+            catalogs = ingest_core.load_catalogs(conn)
+            periodos = {a["periodo"][:7] for a in activities if a.get("periodo")}
+            existing = ingest_core.load_existing_keys(conn, periodos)
+        except Exception as e:
+            print(f"Error cargando catálogos/duplicados: {e}")
+        finally:
+            conn.close()
+    activities, summary = ingest_core.validate(activities, catalogs, existing)
+    return {"columns": columns, "summary": summary, "activities": activities}
+
+
+@app.post("/ingest/commit")
+def ingest_commit(payload: dict = Body(...)):
+    """Re-valida (autoritativo) e inserta a Supabase las actividades incluidas.
+    Idempotente: re-subir el mismo archivo no duplica (import_hash UNIQUE)."""
+    activities = payload.get("activities", []) if isinstance(payload, dict) else []
+    if not activities:
+        return {"inserted": 0, "skipped": 0, "total": 0, "message": "Sin actividades."}
+    conn = get_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Sin conexión a la base de datos.")
+    try:
+        user_inc = [a.get("include", True) for a in activities]
+        catalogs = ingest_core.load_catalogs(conn)
+        periodos = {a["periodo"][:7] for a in activities if a.get("periodo")}
+        existing = ingest_core.load_existing_keys(conn, periodos)
+        activities, _ = ingest_core.validate(activities, catalogs, existing)
+        for i, a in enumerate(activities):
+            a["include"] = user_inc[i] and not any(x["level"] == "error" for x in a.get("issues", []))
+        to_insert = [a for a in activities if a.get("include")]
+        report = ingest_core.build_and_insert(to_insert, conn)
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Error en commit: {e}")
+    finally:
+        conn.close()
+    return report
+
 
 def parse_ubicacion_local(text):
     """Auxiliar para parsear ubicaciones sin cargar scripts externos en el microservicio."""

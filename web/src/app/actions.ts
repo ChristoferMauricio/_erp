@@ -611,3 +611,43 @@ export async function fetchMantenimientoPrediction(nivel?: string) {
     return { ok: false, data: [] as any[] };
   }
 }
+
+// ===================== INGESTA MENSUAL (microservicio /ingest/*) =====================
+
+// Parsea y valida las filas del Excel (devuelve actividades + issues + sugerencias).
+export async function validarIngesta(rows: any[]) {
+  try {
+    const res = await fetch(`${PREDICTIVE_URL}/ingest/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows }),
+      cache: 'no-store',
+    });
+    if (!res.ok) return { ok: false, error: `Microservicio respondió ${res.status}`, activities: [] as any[], summary: null, columns: null };
+    const j = await res.json();
+    return { ok: true, activities: (j.activities || []) as any[], summary: j.summary, columns: j.columns };
+  } catch {
+    return { ok: false, error: 'Microservicio de ingesta no disponible.', activities: [] as any[], summary: null, columns: null };
+  }
+}
+
+// Re-valida e inserta a Supabase las actividades incluidas. Idempotente (dedup por import_hash).
+export async function confirmarIngesta(activities: any[]) {
+  try {
+    const res = await fetch(`${PREDICTIVE_URL}/ingest/commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activities }),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      let detail = `Microservicio respondió ${res.status}`;
+      try { const j = await res.json(); if (j && j.detail) detail = String(j.detail); } catch {}
+      return { ok: false, error: detail };
+    }
+    const j = await res.json();
+    return { ok: true, inserted: j.inserted || 0, skipped: j.skipped || 0, total: j.total || 0 };
+  } catch {
+    return { ok: false, error: 'Microservicio de ingesta no disponible.' };
+  }
+}
