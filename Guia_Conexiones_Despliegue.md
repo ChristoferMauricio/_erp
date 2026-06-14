@@ -8,7 +8,9 @@ Esta guía detalla **paso a paso** el procedimiento completo para configurar la 
 
 > Esta sección refleja el estado **real** del proyecto y **tiene prioridad** sobre el detalle histórico de más abajo donde difieran.
 
-**Ya hecho:** la BD está cargada en Supabase (esquema + catálogos + datos + vistas) y, en local, la app y el microservicio ya leen de ahí. Falta solo **desplegar** el frontend (Vercel) y el microservicio (Render) para no depender de tu PC.
+**Estado actual:** BD cargada en Supabase ✅. Frontend **desplegado en Vercel** ✅ — pero **faltan sus variables de entorno**, por eso las gráficas salen vacías. **Pendiente:** (1) poner las env vars en Vercel y (2) **desplegar el microservicio en Render**. Hecho esto, el sistema funciona desde **cualquier PC con el link**, sin depender de tu máquina.
+
+> Las **únicas** dos variables que usa la app (verificado en `web/src/app/actions.ts`) son **`DATABASE_URL`** y **`PREDICTIVE_API_URL`**. **No** uses `NEXT_PUBLIC_SUPABASE_*` ni `NEXT_PUBLIC_PREDICTIVE_API_URL` — no existen en el código y no harían nada.
 
 ### 1) Cargar la BD en Supabase — 4 archivos EN ORDEN
 1. `supabase/migrations/0001_initial_schema.sql` — esquema (`tarea.fecha_inicio` es **nullable**).
@@ -402,12 +404,10 @@ Expande la sección **"Environment Variables"** y agrega las siguientes:
 
 | Key (nombre de variable) | Value (valor) | Notas |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://postgres.xyz:Pass@...pooler.supabase.com:6543/postgres` | La cadena URI completa de Supabase (Paso 1.2B) |
-| `NEXT_PUBLIC_SUPABASE_URL` | `https://abcdefghij.supabase.co` | La Project URL de Supabase (Paso 1.2A) |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `eyJhbGciOiJIUzI1NiIs...` | La clave anon de Supabase (Paso 1.2A) |
-| `NEXT_PUBLIC_PREDICTIVE_API_URL` | *(Agregar después del Paso 5.3)* | La URL del servicio en Render |
+| `DATABASE_URL` | `postgresql://postgres.<REF>:<PASS>@aws-1-us-east-1.pooler.supabase.com:6543/postgres` | **Transaction pooler, puerto 6543** (verificado). Es lo único que necesita el dashboard para leer la BD. |
+| `PREDICTIVE_API_URL` | `https://<tu-servicio>.onrender.com` | URL pública de Render, **sin `/` final** y **sin** prefijo `NEXT_PUBLIC_`. Agrégala después de desplegar Render (Paso 5). |
 
-> **Nota:** Las variables con prefijo `NEXT_PUBLIC_` son accesibles desde el navegador del usuario. Las que no tienen ese prefijo (como `DATABASE_URL`) solo están disponibles en el servidor de Vercel (Server Actions).
+> **Nota:** La app usa **solo** estas dos variables. **No** necesita `NEXT_PUBLIC_SUPABASE_URL` ni `ANON_KEY`: el dashboard consulta Postgres con `pg` del lado servidor (Server Actions), no con `supabase-js`. Por eso `DATABASE_URL` (sin prefijo `NEXT_PUBLIC_`) nunca llega al navegador — vive solo en el servidor de Vercel.
 
 ### 4.5 — Desplegar
 
@@ -465,7 +465,7 @@ Render compilará y ejecutará el modelo predictivo de series de tiempo (Holt-Wi
 | **Region** | `Oregon (US West)` o la más cercana a São Paulo | Minimizar latencia con Supabase |
 | **Branch** | `main` | La rama principal del repositorio |
 | **Root Directory** | `predictive` | El microservicio de ML vive en esta subcarpeta |
-| **Runtime** | `Docker` | El Dockerfile ya está configurado con `python:3.9-slim`, `build-essential` y `libpq-dev`, asegurando compatibilidad con `psycopg2` y librerías científicas |
+| **Runtime** | `Docker` | Se autodetecta por el Dockerfile (ya bindea a `$PORT`). **Deja Build Command y Start Command VACÍOS** — los provee el Dockerfile. El servicio usa **`pg8000`** (Python puro); `build-essential`/`libpq-dev` ya no son necesarios. |
 | **Instance Type** | `Free` | Suficiente para el volumen actual (~2,300 tareas históricas) |
 
 > **⚠️ Nota sobre el plan Free de Render:** Los servicios gratuitos se **suspenden después de 15 minutos de inactividad** y tardan ~30-60 segundos en "despertar" (cold start) cuando reciben la primera petición. Esto es aceptable para un MVP pero no para producción.
@@ -476,7 +476,7 @@ En la misma pantalla de configuración, ve a la sección **"Environment Variable
 
 | Key | Value |
 |---|---|
-| `DATABASE_URL` | La misma cadena URI de Supabase del Paso 1.2B |
+| `DATABASE_URL` | Supabase **Session pooler, puerto 5432** → `postgresql://postgres.<REF>:<PASS>@aws-1-us-east-1.pooler.supabase.com:5432/postgres`. Misma contraseña que en Vercel, pero **puerto distinto** (pg8000 requiere modo sesión). |
 
 ### 5.5 — Desplegar
 
@@ -490,16 +490,17 @@ En la misma pantalla de configuración, ve a la sección **"Environment Variable
 
 ### 5.6 — Verificar el servicio
 
-Puedes probar que el servicio está activo haciendo una petición GET al endpoint raíz:
+Abre en el navegador (o con `curl`) el endpoint de **salud**:
 
 ```powershell
-curl https://erp-predictive-service.onrender.com/
+curl https://erp-predictive-service.onrender.com/health
 ```
 
-O abriendo la URL en el navegador. Deberías ver una respuesta JSON como:
+Debe responder:
 ```json
-{"status": "ok", "service": "ERP Predictive API"}
+{"mode": "Supabase Cloud", "database_connected": true}
 ```
+Si `database_connected` es `false`, revisa que `DATABASE_URL` en Render use el **puerto 5432** (session). Si tarda ~30-60 s en responder, es el *cold start* del plan Free (normal).
 
 ### 5.7 — Vincular Render con Vercel
 
@@ -511,7 +512,7 @@ O abriendo la URL en el navegador. Deberías ver una respuesta JSON como:
 
    | Key | Value |
    |---|---|
-   | `NEXT_PUBLIC_PREDICTIVE_API_URL` | `https://erp-predictive-service.onrender.com` |
+   | `PREDICTIVE_API_URL` | `https://erp-predictive-service.onrender.com` |
 
 4. Haz clic en **"Save"**.
 5. Ve a **Deployments** y haz clic en **"Redeploy"** en el último deployment (las env vars nuevas no surten efecto hasta el siguiente deploy).
