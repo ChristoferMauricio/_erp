@@ -1,9 +1,11 @@
-"""Ejecuta un archivo .sql contra la BD usando pg8000 (puro Python, SSL para Supabase).
+"""
+Ejecuta un archivo .sql contra la BD usando pg8000 (puro Python, SSL para Supabase).
 
 Uso:
     DATABASE_URL="postgresql://..." python scripts/run_sql.py supabase/migrations/0003_import_hash.sql
 
 Pensado para migraciones simples (sentencias separadas por ';', sin ';' dentro de strings).
+
 """
 import os
 import re
