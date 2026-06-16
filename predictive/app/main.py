@@ -2,7 +2,7 @@ import os
 import re
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -12,7 +12,7 @@ try:
 except ImportError:
     pg8000 = None
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from app import ingest_core
+from app import ingest_core, export_excel
 
 app = FastAPI(
     title="Servicio de Predicción ERP Minero",
@@ -88,6 +88,21 @@ def health_check():
         "database_connected": db_connected,
         "mode": "Supabase Cloud" if DATABASE_URL else "Local Excel Fallback"
     }
+
+@app.get("/export")
+def export_xlsx(pivots: bool = True):
+    """Exporta TODO el histórico a un .xlsx: hoja Datos + hojas de agregación + PivotTables nativas.
+    Con ?pivots=false devuelve la versión robusta sin dinámicas (solo Tablas)."""
+    try:
+        data, nrows = export_excel.generate(query_df, with_pivots=pivots)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="No se pudo generar el export: %s" % e)
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="ERP_UM_Corona_export.xlsx"'},
+    )
+
 
 @app.get("/predict/insumos")
 def predict_insumos(insumo_nombre: Optional[str] = None, meses_proyeccion: int = 3):

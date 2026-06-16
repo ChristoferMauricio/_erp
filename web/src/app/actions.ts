@@ -135,6 +135,42 @@ function taskMatchesFilters(t: DashTask, f: DashFilters): boolean {
 
 // Construye TODO el dashboard a partir de una lista de tareas (de BD o Excel).
 // Unifica la analítica: los filtros solo recortan esta lista y todo se recalcula.
+// Estadística descriptiva para boxplots (cuartiles por interpolación + bigotes 1.5·IQR + outliers)
+function quartiles(values: number[]) {
+  const s = [...values].sort((a, b) => a - b);
+  const n = s.length;
+  const q = (p: number) => {
+    if (n === 0) return 0;
+    const idx = p * (n - 1);
+    const lo = Math.floor(idx), hi = Math.ceil(idx);
+    return s[lo] + (s[hi] - s[lo]) * (idx - lo);
+  };
+  const q1 = q(0.25), median = q(0.5), q3 = q(0.75);
+  const iqr = q3 - q1;
+  const loF = q1 - 1.5 * iqr, hiF = q3 + 1.5 * iqr;
+  const inside = s.filter(v => v >= loF && v <= hiF);
+  const mean = n ? s.reduce((a, b) => a + b, 0) / n : 0;
+  const r = (x: number) => Math.round(x * 100) / 100;
+  return {
+    min: r(s[0] ?? 0), q1: r(q1), median: r(median), q3: r(q3), max: r(s[n - 1] ?? 0),
+    whiskerLo: r(inside.length ? inside[0] : (s[0] ?? 0)),
+    whiskerHi: r(inside.length ? inside[inside.length - 1] : (s[n - 1] ?? 0)),
+    mean: r(mean),
+    outliers: s.filter(v => v < loF || v > hiF).slice(0, 40).map(r),
+  };
+}
+
+function buildHistogram(values: number[], bins: number) {
+  if (!values.length) return [] as { rango: string; count: number }[];
+  const min = Math.min(...values), max = Math.max(...values);
+  if (max === min) return [{ rango: `${Math.round(min * 10) / 10}`, count: values.length }];
+  const width = (max - min) / bins;
+  const counts = new Array(bins).fill(0);
+  values.forEach(v => { let i = Math.floor((v - min) / width); if (i >= bins) i = bins - 1; counts[i]++; });
+  const r = (x: number) => Math.round(x * 10) / 10;
+  return counts.map((c, i) => ({ rango: `${r(min + i * width)}–${r(min + (i + 1) * width)}`, count: c }));
+}
+
 function buildDashboardFromTasks(tasks: DashTask[], source: string) {
   const totalTasks = tasks.length;
 
@@ -160,11 +196,30 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     Incidente: { total: 0, cumple: 0 },
     Requerimiento: { total: 0, cumple: 0 }
   };
+  // Datos para gráficos estadísticos (dispersión, boxplots, histograma)
+  const dispersion: { personas: number; tiempo: number; hh: number; tipo: string; sub: string }[] = [];
+  const tiempoPorSub: { [k: string]: number[] } = {};
+  const hhPorTipo: { [k: string]: number[] } = {};
+  const tiempoTodos: number[] = [];
+  const nivelSubMap: { [niv: string]: { [sub: string]: number } } = {};
 
   tasks.forEach(t => {
     totalPerson += t.cant_personas || 0;
     totalHours += t.tiempo_horas || 0;
     totalHH += t.horas_hombre || 0;
+
+    const _tiempo = t.tiempo_horas || 0;
+    const _personas = t.cant_personas || 0;
+    const _sub = t.subsistema || 'DAT';
+    const _tipo = t.tipo === 'Incidente' ? 'Incidente' : 'Requerimiento';
+    if (_tiempo > 0) {
+      tiempoTodos.push(_tiempo);
+      (tiempoPorSub[_sub] = tiempoPorSub[_sub] || []).push(_tiempo);
+    }
+    if ((t.horas_hombre || 0) > 0) (hhPorTipo[_tipo] = hhPorTipo[_tipo] || []).push(t.horas_hombre);
+    if (_tiempo > 0 && _personas > 0 && dispersion.length < 2000) {
+      dispersion.push({ personas: _personas, tiempo: Math.round(_tiempo * 100) / 100, hh: Math.round(t.horas_hombre || 0), tipo: _tipo, sub: _sub });
+    }
 
     const causaKey = t.causa_raiz || 'Mantenimiento Programado';
     if (!causaMap[causaKey]) causaMap[causaKey] = { count: 0, horas: 0, hh: 0, detalles: {} };
@@ -189,6 +244,8 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
 
     const subCode = t.subsistema || 'DAT';
     subsistemaCountMap[subCode] = (subsistemaCountMap[subCode] || 0) + 1;
+    const _ns = nivelSubMap[nivKey] = nivelSubMap[nivKey] || {};
+    _ns[subCode] = (_ns[subCode] || 0) + 1;
 
     if (t.origen === 'SUP') originCountMap.SUP++; else originCountMap.IM++;
     const tipoKey = t.tipo === 'Incidente' ? 'Incidente' : 'Requerimiento';
@@ -221,6 +278,40 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     lineasMaterial += t.insumos.length;
     if (t.insumos.length > 0) actividadesConMaterial++;
   });
+
+  // ---- estadística descriptiva: boxplots + histograma + correlación ----
+  const boxFrom = (m: { [k: string]: number[] }, minN: number) =>
+    Object.entries(m).filter(([, v]) => v.length >= minN)
+      .map(([name, v]) => ({ name, ...quartiles(v), count: v.length }));
+  const boxTiempoSub = boxFrom(tiempoPorSub, 5).sort((a, b) => b.median - a.median);
+  const boxHHTipo = boxFrom(hhPorTipo, 1).sort((a, b) => a.name.localeCompare(b.name));
+  const histTiempo = buildHistogram(tiempoTodos, 12);
+  let corrPersonasTiempo = 0;
+  if (dispersion.length > 2) {
+    const xs = dispersion.map(d => d.personas), ys = dispersion.map(d => d.tiempo);
+    const n = xs.length, mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
+    let num = 0, dx = 0, dy = 0;
+    for (let i = 0; i < n; i++) { const a = xs[i] - mx, b = ys[i] - my; num += a * b; dx += a * a; dy += b * b; }
+    corrPersonasTiempo = (dx > 0 && dy > 0) ? Math.round((num / Math.sqrt(dx * dy)) * 100) / 100 : 0;
+  }
+
+  // Pareto de Causa Raíz (top 10 + 'Otros') con % acumulado
+  const _causaArr = Object.entries(causaMap).map(([name, v]) => ({ name, count: v.count })).sort((a, b) => b.count - a.count);
+  const _totalCausa = _causaArr.reduce((s, x) => s + x.count, 0) || 1;
+  const _restCausa = _causaArr.slice(10).reduce((s, x) => s + x.count, 0);
+  const _paretoBase = _restCausa > 0 ? [..._causaArr.slice(0, 10), { name: 'Otros', count: _restCausa }] : _causaArr.slice(0, 10);
+  let _acc = 0;
+  const paretoCausas = _paretoBase.map(x => { _acc += x.count; return { name: x.name, count: x.count, acumulado: Math.round((_acc / _totalCausa) * 1000) / 10 }; });
+
+  // Mapa de calor Nivel × Subsistema (top 10 niveles por volumen)
+  const _subOrder = ['DAT', 'CCTV', 'RAD', 'TEL', 'GEO', 'FO', 'WIFI'];
+  const _nivOrdered = Object.entries(nivelSubMap)
+    .map(([niv, mm]) => ({ niv, total: Object.values(mm).reduce((s, x) => s + x, 0) }))
+    .sort((a, b) => b.total - a.total).slice(0, 10);
+  const heatRows = _nivOrdered.map(x => x.niv);
+  const heatCols = _subOrder.filter(s => heatRows.some(r => (nivelSubMap[r] || {})[s]));
+  const heatMatrix = heatRows.map(r => heatCols.map(c => (nivelSubMap[r] || {})[c] || 0));
+  const heatNivelSub = { rows: heatRows, cols: heatCols, matrix: heatMatrix, max: Math.max(1, ...heatMatrix.flat()) };
 
   const topInsumos = Object.entries(insumosCountMap)
     .map(([name, val]) => ({ name, value: Math.round(val * 100) / 100 }))
@@ -299,6 +390,8 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     topInsumos, subsistemas, topLocations, monthlyTrend,
     hhPorCausa, hhPorNivel, causaDetalle, mermas, materialesResumen, cargaProyeccion,
     insumoNames, suministros, sla,
+    dispersion, boxTiempoSub, boxHHTipo, histTiempo, corrPersonasTiempo,
+    paretoCausas, heatNivelSub,
     originDistribution: [
       { name: 'Interior Mina', value: originCountMap.IM },
       { name: 'Superficie', value: originCountMap.SUP }
@@ -649,5 +742,18 @@ export async function confirmarIngesta(activities: any[]) {
     return { ok: true, inserted: j.inserted || 0, skipped: j.skipped || 0, total: j.total || 0 };
   } catch {
     return { ok: false, error: 'Microservicio de ingesta no disponible.' };
+  }
+}
+
+// Exporta TODO el histórico a un .xlsx (Datos + agregaciones + PivotTables nativas) vía microservicio.
+export async function exportarExcel() {
+  try {
+    const res = await fetch(`${PREDICTIVE_URL}/export`, { cache: 'no-store' });
+    if (!res.ok) return { ok: false, error: `Microservicio respondió ${res.status}` };
+    const buf = await res.arrayBuffer();
+    const base64 = Buffer.from(buf).toString('base64');
+    return { ok: true, base64, filename: 'ERP_UM_Corona_export.xlsx' };
+  } catch {
+    return { ok: false, error: 'Microservicio no disponible (¿Render despierto? Reintenta en ~30 s).' };
   }
 }

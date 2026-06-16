@@ -9,7 +9,8 @@ import {
   fetchInsumosPrediction,
   fetchMantenimientoPrediction,
   validarIngesta,
-  confirmarIngesta
+  confirmarIngesta,
+  exportarExcel
 } from './actions';
 import * as XLSX from 'xlsx';
 import {
@@ -39,6 +40,7 @@ import {
   ShieldCheck,
   AlertTriangle,
   UploadCloud,
+  Download,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -53,8 +55,16 @@ import {
   ResponsiveContainer,
   PieChart,
   Pie,
-  Cell
+  Cell,
+  ScatterChart,
+  Scatter,
+  ZAxis,
+  ComposedChart,
+  Line
 } from 'recharts';
+import { BoxPlot } from '@/components/BoxPlot';
+import { HowCalc } from '@/components/HowCalc';
+import { Heatmap } from '@/components/Heatmap';
 
 const CAUSE_TO_SUBSYSTEM: { [key: string]: string } = {
   'Balun Averiado': 'CCTV',
@@ -94,7 +104,7 @@ function inferSubsystem(cause: string | null | undefined): string {
 
 export default function Home() {
   const { theme, toggleTheme } = useTheme();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'productividad' | 'inventario' | 'mantenimiento' | 'ingesta' | 'tasks'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'productividad' | 'inventario' | 'mantenimiento' | 'estadisticas' | 'ingesta' | 'tasks'>('dashboard');
   const [mounted, setMounted] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -125,6 +135,31 @@ export default function Home() {
   const [ingestCommit, setIngestCommit] = useState<any>(null);
   const [ingestFileName, setIngestFileName] = useState<string>('');
   const [dragOver, setDragOver] = useState(false);
+
+  // Exportar a Excel
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string>('');
+
+  async function doExport() {
+    setExportMsg('');
+    setExportLoading(true);
+    try {
+      const r: any = await exportarExcel();
+      if (!r.ok || !r.base64) { setExportMsg(r.error || 'No se pudo exportar.'); return; }
+      const bin = atob(r.base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = r.filename || 'ERP_export.xlsx'; a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setExportMsg('Error inesperado al exportar.');
+    } finally {
+      setExportLoading(false);
+    }
+  }
 
   const [isPending, startTransition] = useTransition();
 
@@ -249,6 +284,7 @@ export default function Home() {
     { id: 'productividad' as const, label: 'Productividad', icon: TrendingUp, desc: 'Tiempo y Horas-Hombre' },
     { id: 'inventario' as const, label: 'Inventario', icon: Boxes, desc: 'Suministros y mermas' },
     { id: 'mantenimiento' as const, label: 'Mantenimiento', icon: Activity, desc: 'Zonas calientes y causas' },
+    { id: 'estadisticas' as const, label: 'Estadísticas', icon: BarChart3, desc: 'Dispersión, cajas, histograma' },
     { id: 'ingesta' as const, label: 'Ingesta', icon: UploadCloud, desc: 'Cargar Excel del mes' },
     { id: 'tasks' as const, label: 'Tareas', icon: Wrench, desc: 'Registro de operaciones', badge: totalTasks },
   ];
@@ -258,6 +294,7 @@ export default function Home() {
     productividad: 'Productividad · Tiempo & HH',
     inventario: 'Inventario · Suministros',
     mantenimiento: 'Mantenimiento · Análisis',
+    estadisticas: 'Análisis Estadístico',
     ingesta: 'Ingesta de Datos',
     tasks: 'Registro de Tareas',
   };
@@ -359,6 +396,27 @@ export default function Home() {
               </button>
             );
           })}
+
+          {/* Exportar todo a Excel (datos + tablas dinámicas) vía microservicio */}
+          <button
+            onClick={doExport}
+            disabled={exportLoading}
+            title="Exportar todo a Excel (datos + tablas dinámicas)"
+            className={`
+              w-full flex items-center gap-3 rounded-xl transition-colors mt-1
+              ${sidebarOpen ? 'px-3 py-2.5' : 'px-0 py-2.5 justify-center'}
+              text-gray-600 dark:text-slate-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 hover:text-emerald-700 dark:hover:text-emerald-400
+              ${exportLoading ? 'opacity-60 cursor-wait' : ''}
+            `}
+          >
+            {exportLoading
+              ? <Activity className="h-[18px] w-[18px] shrink-0 animate-spin" />
+              : <Download className="h-[18px] w-[18px] shrink-0" />}
+            {sidebarOpen && <span className="text-sm font-medium">{exportLoading ? 'Generando…' : 'Exportar a Excel'}</span>}
+          </button>
+          {sidebarOpen && exportMsg && (
+            <p className="text-[10px] text-rose-500 px-3 mt-1 leading-snug">{exportMsg}</p>
+          )}
 
           <div className="pt-4">
             {sidebarOpen && (
@@ -665,6 +723,9 @@ export default function Home() {
                           <div>
                             <h3 className="text-sm font-bold text-gray-900 dark:text-white">Horas-Hombre por Causa Raíz</h3>
                             <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">HH = personas × tiempo · dónde se concentra el esfuerzo</p>
+                            <HowCalc>
+                              <p><strong>HH (Horas-Hombre)</strong> = Cant. Personas × Tiempo (h) de cada tarea. Se suma por causa raíz y se ordena de mayor a menor — indica dónde se concentra el esfuerzo del equipo.</p>
+                            </HowCalc>
                           </div>
                           <div className="text-right shrink-0">
                             <span className="block text-2xl font-extrabold text-gray-900 dark:text-white tracking-tight">{dashboardData.totalHH?.toLocaleString()}</span>
@@ -813,6 +874,9 @@ export default function Home() {
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">Mermas · Consumo por HH</h3>
                           <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Intensidad de consumo, no total bruto</p>
+                          <HowCalc>
+                            <p><strong>Intensidad = Cantidad de insumo ⁄ HH</strong> (consumo por hora-hombre). Mide cuánto material se gasta por unidad de esfuerzo, no el total bruto — sirve para detectar uso anormal o mermas. Se incluyen insumos con ≥10 HH acumulado.</p>
+                          </HowCalc>
                         </div>
                         <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
                           {dashboardData.mermas.length === 0 ? (
@@ -975,6 +1039,9 @@ export default function Home() {
                             <ShieldCheck className="h-4 w-4 text-teal-500" /> Cumplimiento ANS
                           </h3>
                           <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">% de tareas dentro del objetivo de horas (col. Tiempo)</p>
+                          <HowCalc>
+                            <p><strong>Cumplimiento = (tareas con Tiempo ≤ objetivo ⁄ total con tiempo) × 100</strong>. Objetivos: Incidente ≤ 3 h, Requerimiento ≤ 4 h. Usa la columna Tiempo como esfuerzo de resolución (no fechas).</p>
+                          </HowCalc>
                         </div>
                         <div className="text-center py-1">
                           <span className="text-4xl font-extrabold text-teal-600 dark:text-teal-400">{dashboardData.sla.pct}%</span>
@@ -1005,6 +1072,151 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* ========== ESTADÍSTICAS TAB ========== */}
+            {activeTab === 'estadisticas' && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Dispersión */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Dispersión · Personas vs. Tiempo</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">
+                      Cada punto = una tarea (tamaño ∝ HH). Correlación de Pearson r = <strong>{dashboardData.corrPersonasTiempo ?? 0}</strong>. Útil para detectar tareas atípicas (mucho esfuerzo).
+                    </p>
+                  </div>
+                  <div className="h-80 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ScatterChart margin={{ top: 10, right: 24, bottom: 24, left: 4 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                        <XAxis type="number" dataKey="personas" name="Personas" stroke={axisStroke} fontSize={11} tickLine={false}
+                          label={{ value: 'Personas', position: 'insideBottom', offset: -10, fontSize: 11, fill: axisStroke }} />
+                        <YAxis type="number" dataKey="tiempo" name="Tiempo (h)" stroke={axisStroke} fontSize={11} tickLine={false}
+                          label={{ value: 'Tiempo (h)', angle: -90, position: 'insideLeft', fontSize: 11, fill: axisStroke }} />
+                        <ZAxis type="number" dataKey="hh" range={[20, 240]} name="HH" />
+                        <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={tooltipStyle} />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                        <Scatter name="Incidente" data={(dashboardData.dispersion || []).filter((d: any) => d.tipo === 'Incidente')} fill="#f43f5e" fillOpacity={0.45} />
+                        <Scatter name="Requerimiento" data={(dashboardData.dispersion || []).filter((d: any) => d.tipo === 'Requerimiento')} fill="#3b82f6" fillOpacity={0.45} />
+                      </ScatterChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <HowCalc>
+                    <p>Cada punto es una tarea: X = <strong>Personas</strong>, Y = <strong>Tiempo (h)</strong>, y el tamaño del punto ∝ <strong>HH = Personas × Tiempo</strong>.</p>
+                    <p><strong>r</strong> = correlación de Pearson = Σ(xᵢ−x̄)(yᵢ−ȳ) ⁄ √(Σ(xᵢ−x̄)²·Σ(yᵢ−ȳ)²); va de −1 a 1 (0 ≈ sin relación). Se calcula sobre tareas con personas y tiempo positivos.</p>
+                  </HowCalc>
+                </div>
+
+                {/* Boxplot Tiempo por Subsistema */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Distribución de Tiempo (h) por Subsistema</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Caja = Q1–Q3 · línea = mediana · rombo = media · puntos = atípicos</p>
+                  </div>
+                  <BoxPlot data={dashboardData.boxTiempoSub || []} unit="horas" color="#2dd4bf" dark={theme === 'dark'} height={300} />
+                  <HowCalc>
+                    <p>Por subsistema se ordenan los tiempos y se obtienen los cuartiles por interpolación: <strong>Q1</strong> (25%), <strong>mediana</strong> (50%), <strong>Q3</strong> (75%). La caja va de Q1 a Q3 (IQR = Q3 − Q1).</p>
+                    <p>Los bigotes llegan al dato más extremo dentro de <strong>1.5×IQR</strong>; los puntos fuera son <strong>atípicos</strong>. El rombo es la media. Mínimo 5 tareas por subsistema.</p>
+                  </HowCalc>
+                </div>
+
+                {/* Boxplot HH por Tipo */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Distribución de HH por Tipo</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Incidente vs. Requerimiento — compara el esfuerzo (Horas-Hombre)</p>
+                  </div>
+                  <BoxPlot data={dashboardData.boxHHTipo || []} unit="HH" color="#8b5cf6" dark={theme === 'dark'} height={300} />
+                  <HowCalc>
+                    <p>Igual que el boxplot anterior pero sobre <strong>HH = Personas × Tiempo</strong>, separando <strong>Incidente</strong> y <strong>Requerimiento</strong>. Compara mediana y dispersión del esfuerzo entre ambos tipos.</p>
+                  </HowCalc>
+                </div>
+
+                {/* Histograma de Tiempo */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Histograma · Tiempo (h) por tarea</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Frecuencia de tareas por rango de horas — muestra la forma de la distribución</p>
+                  </div>
+                  <div className="h-72 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={dashboardData.histTiempo || []}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                        <XAxis dataKey="rango" stroke={axisStroke} fontSize={10} tickLine={false} interval={0} angle={-35} textAnchor="end" height={54} />
+                        <YAxis stroke={axisStroke} fontSize={11} tickLine={false} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Bar dataKey="count" name="Tareas" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <HowCalc>
+                    <p>Se toma el rango del Tiempo (mín–máx) y se divide en <strong>12 intervalos iguales</strong> (bins). Cada barra cuenta cuántas tareas caen en ese rango — muestra la forma de la distribución (concentración, cola larga, etc.).</p>
+                  </HowCalc>
+                </div>
+
+                {/* Pareto de causas */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Pareto · Causa Raíz (80/20)</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Pocas causas explican la mayoría de las tareas — prioriza dónde atacar</p>
+                  </div>
+                  <div className="h-80 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={dashboardData.paretoCausas || []}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                        <XAxis dataKey="name" stroke={axisStroke} fontSize={9} tickLine={false} interval={0} angle={-30} textAnchor="end" height={80} />
+                        <YAxis yAxisId="left" stroke={axisStroke} fontSize={11} tickLine={false} />
+                        <YAxis yAxisId="right" orientation="right" domain={[0, 100]} unit="%" stroke={axisStroke} fontSize={11} tickLine={false} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                        <Bar yAxisId="left" dataKey="count" name="Tareas" fill="#2dd4bf" radius={[4, 4, 0, 0]} />
+                        <Line yAxisId="right" type="monotone" dataKey="acumulado" name="% acumulado" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <HowCalc>
+                    <p>Las causas se ordenan de mayor a menor nº de tareas (top 10 + “Otros”). Las barras son el conteo; la línea es el <strong>% acumulado</strong> = (suma de tareas hasta esa causa ⁄ total) × 100.</p>
+                    <p>Aplica el principio <strong>80/20</strong>: las primeras causas (donde la línea sube rápido) concentran la mayor parte de las intervenciones.</p>
+                  </HowCalc>
+                </div>
+
+                {/* Mapa de calor Nivel x Subsistema */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Mapa de calor · Nivel × Subsistema</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Dónde y en qué tecnología se concentran las intervenciones</p>
+                  </div>
+                  <Heatmap rows={dashboardData.heatNivelSub?.rows || []} cols={dashboardData.heatNivelSub?.cols || []} matrix={dashboardData.heatNivelSub?.matrix || []} max={dashboardData.heatNivelSub?.max || 1} dark={theme === 'dark'} />
+                  <HowCalc>
+                    <p>Cada celda cuenta las tareas en ese <strong>Nivel × Subsistema</strong>. El color es proporcional al valor (más oscuro = más tareas), escalado al máximo de la matriz. Se muestran los 10 niveles con más actividad.</p>
+                  </HowCalc>
+                </div>
+
+                {/* % Incidentes vs Requerimientos por mes */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">% Incidentes vs Requerimientos por mes</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">¿El equipo apaga incendios (correctivo) o mejora (evolutivo)?</p>
+                  </div>
+                  <div className="h-72 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={dashboardData.monthlyTrend || []} stackOffset="expand">
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                        <XAxis dataKey="month" stroke={axisStroke} fontSize={11} tickLine={false} />
+                        <YAxis stroke={axisStroke} fontSize={11} tickLine={false} tickFormatter={(v: number) => `${Math.round(v * 100)}%`} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                        <Area type="monotone" dataKey="incidentes" name="Incidentes" stackId="1" stroke="#f43f5e" fill="#f43f5e" fillOpacity={0.5} />
+                        <Area type="monotone" dataKey="requerimientos" name="Requerimientos" stackId="1" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.5} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <HowCalc>
+                    <p>Por mes se cuentan <strong>Incidentes</strong> y <strong>Requerimientos</strong> y se normaliza a 100% (cada banda = su proporción del total del mes).</p>
+                    <p>Más incidentes ⇒ trabajo <strong>correctivo</strong> (reactivo); más requerimientos ⇒ trabajo <strong>evolutivo</strong> (mejoras/instalaciones).</p>
+                  </HowCalc>
+                </div>
               </div>
             )}
 
