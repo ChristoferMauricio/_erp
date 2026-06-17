@@ -71,6 +71,8 @@ import { BoxPlot } from '@/components/BoxPlot';
 import { HowCalc } from '@/components/HowCalc';
 import { Heatmap } from '@/components/Heatmap';
 
+const VALID_TABS = ['dashboard', 'productividad', 'inventario', 'mantenimiento', 'estadisticas', 'ingesta', 'tasks'] as const;
+
 const CAUSE_TO_SUBSYSTEM: { [key: string]: string } = {
   'Balun Averiado': 'CCTV',
   'Cámara Averiado': 'CCTV',
@@ -170,10 +172,18 @@ export default function Home() {
 
   useEffect(() => {
     setMounted(true);
+    // Pestaña activa <-> hash de la URL (navegable y persiste al recargar)
+    const applyHash = () => {
+      const h = window.location.hash.replace('#', '');
+      if ((VALID_TABS as readonly string[]).includes(h)) setActiveTab(h as typeof activeTab);
+    };
+    applyHash();
+    window.addEventListener('hashchange', applyHash);
     fetchDashboardData(filters).then(setDashboardData);
     fetchCargaPrediction().then(r => { if (r.ok) setCargaPred(r.data); });
     fetchMantenimientoPrediction().then(r => { if (r.ok) setRiesgoZonas(r.data); });
     loadTasks(1, '', '', '');
+    return () => window.removeEventListener('hashchange', applyHash);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -284,6 +294,13 @@ export default function Home() {
   const gridStroke = theme === 'dark' ? '#1e293b' : '#f1f5f9';
   const axisStroke = theme === 'dark' ? '#64748b' : '#9ca3af';
 
+  const goTab = (id: typeof activeTab) => {
+    setActiveTab(id);
+    if (typeof window !== 'undefined' && window.location.hash.slice(1) !== id) {
+      window.location.hash = id;
+    }
+  };
+
   const navItems = [
     { id: 'dashboard' as const, label: 'Resumen', icon: LayoutDashboard, desc: 'Visión general' },
     { id: 'productividad' as const, label: 'Productividad', icon: TrendingUp, desc: 'Tiempo y Horas-Hombre' },
@@ -374,7 +391,7 @@ export default function Home() {
             return (
               <button
                 key={item.id}
-                onClick={() => { setActiveTab(item.id); setMobileSidebarOpen(false); }}
+                onClick={() => { goTab(item.id); setMobileSidebarOpen(false); }}
                 title={!sidebarOpen ? item.label : undefined}
                 className={`
                   w-full flex items-center gap-3 rounded-xl transition-all duration-200 group
