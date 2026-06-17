@@ -60,7 +60,12 @@ import {
   Scatter,
   ZAxis,
   ComposedChart,
-  Line
+  Line,
+  RadarChart,
+  Radar,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis
 } from 'recharts';
 import { BoxPlot } from '@/components/BoxPlot';
 import { HowCalc } from '@/components/HowCalc';
@@ -1215,6 +1220,58 @@ export default function Home() {
                   <HowCalc>
                     <p>Por mes se cuentan <strong>Incidentes</strong> y <strong>Requerimientos</strong> y se normaliza a 100% (cada banda = su proporción del total del mes).</p>
                     <p>Más incidentes ⇒ trabajo <strong>correctivo</strong> (reactivo); más requerimientos ⇒ trabajo <strong>evolutivo</strong> (mejoras/instalaciones).</p>
+                  </HowCalc>
+                </div>
+
+                {/* Radar por subsistema */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Radar · Subsistema (Tareas vs HH)</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Dónde el esfuerzo no acompaña al nº de tareas</p>
+                  </div>
+                  <div className="h-80 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <RadarChart data={dashboardData.radarSub || []} outerRadius="72%">
+                        <PolarGrid stroke={gridStroke} />
+                        <PolarAngleAxis dataKey="sub" tick={{ fontSize: 11, fill: axisStroke }} />
+                        <PolarRadiusAxis domain={[0, 100]} angle={90} tick={{ fontSize: 9, fill: axisStroke }} />
+                        <Radar name="% Tareas" dataKey="tareasPct" stroke="#2dd4bf" fill="#2dd4bf" fillOpacity={0.3} />
+                        <Radar name="% HH" dataKey="hhPct" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.25} />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                        <Tooltip contentStyle={tooltipStyle} />
+                      </RadarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <HowCalc>
+                    <p>Por subsistema se calcula el <strong>% de tareas</strong> (tareas ⁄ máximo entre subsistemas × 100) y el <strong>% de HH</strong> (HH ⁄ máximo × 100). Cada métrica se normaliza a su propio máximo para compararlas en los mismos ejes.</p>
+                    <p>Cuando la banda ámbar (HH) sobresale de la verde (tareas), ese subsistema consume <strong>más esfuerzo por tarea</strong> de lo habitual.</p>
+                  </HowCalc>
+                </div>
+
+                {/* Dispersión HH vs nº de insumos */}
+                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Dispersión · HH vs nº de insumos</h3>
+                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Identifica actividades intensivas en material</p>
+                  </div>
+                  <div className="h-80 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ScatterChart margin={{ top: 10, right: 24, bottom: 24, left: 4 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+                        <XAxis type="number" dataKey="nInsumos" name="N.º insumos" stroke={axisStroke} fontSize={11} tickLine={false}
+                          label={{ value: 'N.º de insumos', position: 'insideBottom', offset: -10, fontSize: 11, fill: axisStroke }} />
+                        <YAxis type="number" dataKey="hh" name="HH" stroke={axisStroke} fontSize={11} tickLine={false}
+                          label={{ value: 'HH', angle: -90, position: 'insideLeft', fontSize: 11, fill: axisStroke }} />
+                        <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={tooltipStyle} />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                        <Scatter name="Incidente" data={(dashboardData.dispersionInsumos || []).filter((d: any) => d.tipo === 'Incidente')} fill="#f43f5e" fillOpacity={0.45} />
+                        <Scatter name="Requerimiento" data={(dashboardData.dispersionInsumos || []).filter((d: any) => d.tipo === 'Requerimiento')} fill="#3b82f6" fillOpacity={0.45} />
+                      </ScatterChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <HowCalc>
+                    <p>Cada punto es una actividad: X = <strong>nº de insumos</strong> (líneas de material), Y = <strong>HH</strong> = Personas × Tiempo. Solo actividades con material y HH &gt; 0.</p>
+                    <p>Los puntos arriba‑derecha combinan <strong>mucho material y mucho esfuerzo</strong> — candidatas a estandarizar o revisar.</p>
                   </HowCalc>
                 </div>
               </div>

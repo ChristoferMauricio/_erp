@@ -202,6 +202,8 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
   const hhPorTipo: { [k: string]: number[] } = {};
   const tiempoTodos: number[] = [];
   const nivelSubMap: { [niv: string]: { [sub: string]: number } } = {};
+  const hhBySubMap: { [k: string]: number } = {};
+  const dispersionInsumos: { nInsumos: number; hh: number; tipo: string }[] = [];
 
   tasks.forEach(t => {
     totalPerson += t.cant_personas || 0;
@@ -219,6 +221,9 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     if ((t.horas_hombre || 0) > 0) (hhPorTipo[_tipo] = hhPorTipo[_tipo] || []).push(t.horas_hombre);
     if (_tiempo > 0 && _personas > 0 && dispersion.length < 2000) {
       dispersion.push({ personas: _personas, tiempo: Math.round(_tiempo * 100) / 100, hh: Math.round(t.horas_hombre || 0), tipo: _tipo, sub: _sub });
+    }
+    if (t.insumos.length > 0 && (t.horas_hombre || 0) > 0 && dispersionInsumos.length < 2000) {
+      dispersionInsumos.push({ nInsumos: t.insumos.length, hh: Math.round(t.horas_hombre || 0), tipo: _tipo });
     }
 
     const causaKey = t.causa_raiz || 'Mantenimiento Programado';
@@ -246,6 +251,7 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     subsistemaCountMap[subCode] = (subsistemaCountMap[subCode] || 0) + 1;
     const _ns = nivelSubMap[nivKey] = nivelSubMap[nivKey] || {};
     _ns[subCode] = (_ns[subCode] || 0) + 1;
+    hhBySubMap[subCode] = (hhBySubMap[subCode] || 0) + (t.horas_hombre || 0);
 
     if (t.origen === 'SUP') originCountMap.SUP++; else originCountMap.IM++;
     const tipoKey = t.tipo === 'Incidente' ? 'Incidente' : 'Requerimiento';
@@ -312,6 +318,15 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
   const heatCols = _subOrder.filter(s => heatRows.some(r => (nivelSubMap[r] || {})[s]));
   const heatMatrix = heatRows.map(r => heatCols.map(c => (nivelSubMap[r] || {})[c] || 0));
   const heatNivelSub = { rows: heatRows, cols: heatCols, matrix: heatMatrix, max: Math.max(1, ...heatMatrix.flat()) };
+
+  // Radar por subsistema: % de tareas y % de HH (cada uno normalizado a su máximo)
+  const _maxTareasSub = Math.max(1, ...Object.values(subsistemaCountMap));
+  const _maxHHSub = Math.max(1, ...Object.values(hhBySubMap));
+  const radarSub = Object.keys(subsistemaCountMap).sort().map(sub => ({
+    sub,
+    tareasPct: Math.round((subsistemaCountMap[sub] / _maxTareasSub) * 100),
+    hhPct: Math.round(((hhBySubMap[sub] || 0) / _maxHHSub) * 100),
+  }));
 
   const topInsumos = Object.entries(insumosCountMap)
     .map(([name, val]) => ({ name, value: Math.round(val * 100) / 100 }))
@@ -391,7 +406,7 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     hhPorCausa, hhPorNivel, causaDetalle, mermas, materialesResumen, cargaProyeccion,
     insumoNames, suministros, sla,
     dispersion, boxTiempoSub, boxHHTipo, histTiempo, corrPersonasTiempo,
-    paretoCausas, heatNivelSub,
+    paretoCausas, heatNivelSub, radarSub, dispersionInsumos,
     originDistribution: [
       { name: 'Interior Mina', value: originCountMap.IM },
       { name: 'Superficie', value: originCountMap.SUP }
