@@ -810,10 +810,15 @@ export default function Home() {
                               <Tooltip contentStyle={tooltipStyle} />
                               <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
                               <Area type="monotone" name="Histórico" dataKey={cargaMetric} stroke="#8b5cf6" fillOpacity={1} fill="url(#colorHH)" strokeWidth={2} connectNulls />
+                              <Area type="monotone" name="Rango estimado" dataKey={cargaMetric === 'hh' ? 'hhBanda' : 'tareasBanda'} stroke="none" fill="#14b8a6" fillOpacity={0.12} connectNulls />
                               <Area type="monotone" name="Proyectado" dataKey={cargaMetric === 'hh' ? 'hhProy' : 'tareasProy'} stroke="#14b8a6" strokeDasharray="5 5" fill="none" strokeWidth={2} connectNulls />
                             </AreaChart>
                           </ResponsiveContainer>
                         </div>
+                        <HowCalc>
+                          <p>El histórico se proyecta con <strong>Holt-Winters</strong> (suavizado exponencial) en el microservicio; si no está disponible, cae a una <strong>regresión lineal</strong> baseline.</p>
+                          <p>La <strong>banda</strong> = proyección ± <strong>1.28·σ·√h</strong> (σ = desviación estándar del histórico, h = meses adelante). La incertidumbre crece con el horizonte (√h). Rango orientativo (~80%), no un intervalo exacto.</p>
+                        </HowCalc>
                       </div>
                     )}
                     {activeTab === 'productividad' && (
@@ -929,6 +934,7 @@ export default function Home() {
                                 <Tooltip contentStyle={tooltipStyle} />
                                 <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
                                 <Area type="monotone" name="Consumo histórico" dataKey="cantidad" stroke="#2dd4bf" fillOpacity={1} fill="url(#colorIns)" strokeWidth={2} connectNulls />
+                                <Area type="monotone" name="Rango estimado" dataKey="banda" stroke="none" fill="#f59e0b" fillOpacity={0.12} connectNulls />
                                 <Area type="monotone" name="Proyección" dataKey="cantidadProy" stroke="#f59e0b" strokeDasharray="5 5" fill="none" strokeWidth={2} connectNulls />
                               </AreaChart>
                             </ResponsiveContainer>
@@ -938,6 +944,9 @@ export default function Home() {
                             </div>
                           )}
                         </div>
+                        <HowCalc>
+                          <p>Por insumo, el histórico mensual se proyecta con <strong>Holt-Winters</strong> (vía microservicio); la <strong>banda</strong> = proyección ± <strong>1.28·σ·√h</strong> (σ = desviación estándar del histórico, h = meses adelante). Úsala como rango para definir el <strong>stock de seguridad</strong>.</p>
+                        </HowCalc>
                       </div>
                     )}
 

@@ -171,6 +171,14 @@ function buildHistogram(values: number[], bins: number) {
   return counts.map((c, i) => ({ rango: `${r(min + i * width)}–${r(min + (i + 1) * width)}`, count: c }));
 }
 
+// Desviación estándar muestral (para las bandas de confianza de las predicciones)
+function stddev(values: number[]) {
+  const v = values.filter(x => typeof x === 'number' && !isNaN(x));
+  if (v.length < 2) return 0;
+  const m = v.reduce((a, b) => a + b, 0) / v.length;
+  return Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / (v.length - 1));
+}
+
 function buildDashboardFromTasks(tasks: DashTask[], source: string) {
   const totalTasks = tasks.length;
 
@@ -666,16 +674,30 @@ export async function fetchCargaPrediction(meses = 3) {
     const j = await res.json();
     const hist = j.historico || [];
     const proy = j.proyeccion || [];
+    const sHH = stddev(hist.map((h: any) => h.hh));
+    const sTar = stddev(hist.map((h: any) => h.tareas));
+    const z = 1.28; // ~80%
     const points = hist.map((h: any) => ({
-      month: h.month, hh: Math.round(h.hh), tareas: h.tareas, hhProy: null as number | null, tareasProy: null as number | null
+      month: h.month, hh: Math.round(h.hh), tareas: h.tareas,
+      hhProy: null as number | null, tareasProy: null as number | null,
+      hhBanda: null as number[] | null, tareasBanda: null as number[] | null
     }));
     if (points.length) {
-      points[points.length - 1].hhProy = Math.round(hist[hist.length - 1].hh);
-      points[points.length - 1].tareasProy = hist[hist.length - 1].tareas;
+      const last = hist[hist.length - 1];
+      points[points.length - 1].hhProy = Math.round(last.hh);
+      points[points.length - 1].tareasProy = last.tareas;
+      points[points.length - 1].hhBanda = [Math.round(last.hh), Math.round(last.hh)];
+      points[points.length - 1].tareasBanda = [last.tareas, last.tareas];
     }
-    proy.forEach((p: any) => points.push({
-      month: p.month, hh: null, tareas: null, hhProy: Math.round(p.hh), tareasProy: p.tareas
-    }));
+    proy.forEach((p: any, i: number) => {
+      const k = z * Math.sqrt(i + 1);
+      points.push({
+        month: p.month, hh: null, tareas: null,
+        hhProy: Math.round(p.hh), tareasProy: p.tareas,
+        hhBanda: [Math.max(0, Math.round(p.hh - k * sHH)), Math.round(p.hh + k * sHH)],
+        tareasBanda: [Math.max(0, Math.round(p.tareas - k * sTar)), Math.round(p.tareas + k * sTar)]
+      });
+    });
     return { ok: true, data: points };
   } catch {
     return { ok: false, data: [] as any[] };
@@ -694,13 +716,25 @@ export async function fetchInsumosPrediction(insumo: string, meses = 3) {
     if (!p) return { ok: true, insumo, data: [] as any[] };
     const hist = p.historico || [];
     const proy = p.proyeccion || [];
+    const sCant = stddev(hist.map((h: any) => h.cantidad));
+    const z = 1.28; // ~80%
+    const r2 = (x: number) => Math.round(x * 100) / 100;
     const points = hist.map((h: any) => ({
-      fecha: String(h.fecha).substring(0, 7), cantidad: Math.round(h.cantidad * 100) / 100, cantidadProy: null as number | null
+      fecha: String(h.fecha).substring(0, 7), cantidad: r2(h.cantidad),
+      cantidadProy: null as number | null, banda: null as number[] | null
     }));
-    if (points.length) points[points.length - 1].cantidadProy = Math.round(hist[hist.length - 1].cantidad * 100) / 100;
-    proy.forEach((x: any) => points.push({
-      fecha: String(x.fecha).substring(0, 7), cantidad: null, cantidadProy: Math.round(x.cantidad * 100) / 100
-    }));
+    if (points.length) {
+      const lastC = r2(hist[hist.length - 1].cantidad);
+      points[points.length - 1].cantidadProy = lastC;
+      points[points.length - 1].banda = [lastC, lastC];
+    }
+    proy.forEach((x: any, i: number) => {
+      const k = z * Math.sqrt(i + 1);
+      points.push({
+        fecha: String(x.fecha).substring(0, 7), cantidad: null, cantidadProy: r2(x.cantidad),
+        banda: [Math.max(0, r2(x.cantidad - k * sCant)), r2(x.cantidad + k * sCant)]
+      });
+    });
     return { ok: true, insumo: p.insumo, data: points };
   } catch {
     return { ok: false, insumo, data: [] as any[] };
