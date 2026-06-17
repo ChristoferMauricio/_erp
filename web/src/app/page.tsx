@@ -72,6 +72,19 @@ import { HowCalc } from '@/components/HowCalc';
 import { Heatmap } from '@/components/Heatmap';
 
 const VALID_TABS = ['dashboard', 'productividad', 'inventario', 'mantenimiento', 'estadisticas', 'ingesta', 'tasks'] as const;
+type TabId = typeof VALID_TABS[number];
+
+// Lee pestaña + filtros desde la URL (?tab=...&sub=...&tipo=...&origen=...). Solo cliente.
+function readUrlState(): { tab: TabId; filters: { subsistema?: string; tipo?: string; origen?: string } } {
+  if (typeof window === 'undefined') return { tab: 'dashboard', filters: {} };
+  const sp = new URLSearchParams(window.location.search);
+  const t = sp.get('tab') || '';
+  const filters: { subsistema?: string; tipo?: string; origen?: string } = {};
+  const sub = sp.get('sub'); if (sub) filters.subsistema = sub;
+  const tipo = sp.get('tipo'); if (tipo) filters.tipo = tipo;
+  const ori = sp.get('origen'); if (ori) filters.origen = ori;
+  return { tab: (VALID_TABS as readonly string[]).includes(t) ? (t as TabId) : 'dashboard', filters };
+}
 
 const CAUSE_TO_SUBSYSTEM: { [key: string]: string } = {
   'Balun Averiado': 'CCTV',
@@ -111,7 +124,7 @@ function inferSubsystem(cause: string | null | undefined): string {
 
 export default function Home() {
   const { theme, toggleTheme } = useTheme();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'productividad' | 'inventario' | 'mantenimiento' | 'estadisticas' | 'ingesta' | 'tasks'>('dashboard');
+  const [activeTab, setActiveTab] = useState<TabId>(() => readUrlState().tab);
   const [mounted, setMounted] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -129,7 +142,7 @@ export default function Home() {
   const [selectedTask, setSelectedTask] = useState<any>(null);
 
   // Filtros interactivos (re-consultan el dashboard) y estado de predicción
-  const [filters, setFilters] = useState<{ subsistema?: string; tipo?: string; origen?: string }>({});
+  const [filters, setFilters] = useState<{ subsistema?: string; tipo?: string; origen?: string }>(() => readUrlState().filters);
   const [cargaPred, setCargaPred] = useState<any[] | null>(null);
   const [cargaMetric, setCargaMetric] = useState<'hh' | 'tareas'>('hh');
   const [selectedInsumo, setSelectedInsumo] = useState<string>('');
@@ -172,20 +185,24 @@ export default function Home() {
 
   useEffect(() => {
     setMounted(true);
-    // Pestaña activa <-> hash de la URL (navegable y persiste al recargar)
-    const applyHash = () => {
-      const h = window.location.hash.replace('#', '');
-      if ((VALID_TABS as readonly string[]).includes(h)) setActiveTab(h as typeof activeTab);
-    };
-    applyHash();
-    window.addEventListener('hashchange', applyHash);
     fetchDashboardData(filters).then(setDashboardData);
     fetchCargaPrediction().then(r => { if (r.ok) setCargaPred(r.data); });
     fetchMantenimientoPrediction().then(r => { if (r.ok) setRiesgoZonas(r.data); });
     loadTasks(1, '', '', '');
-    return () => window.removeEventListener('hashchange', applyHash);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Reflejar pestaña + filtros en la URL (?tab=...&sub=...&tipo=...&origen=...): persiste al recargar y es compartible
+  useEffect(() => {
+    if (!mounted) return;
+    const sp = new URLSearchParams();
+    if (activeTab !== 'dashboard') sp.set('tab', activeTab);
+    if (filters.subsistema) sp.set('sub', filters.subsistema);
+    if (filters.tipo) sp.set('tipo', filters.tipo);
+    if (filters.origen) sp.set('origen', filters.origen);
+    const qs = sp.toString();
+    window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
+  }, [activeTab, filters, mounted]);
 
   // Re-consultar el dashboard cuando cambian los filtros
   useEffect(() => {
@@ -294,12 +311,7 @@ export default function Home() {
   const gridStroke = theme === 'dark' ? '#1e293b' : '#f1f5f9';
   const axisStroke = theme === 'dark' ? '#64748b' : '#9ca3af';
 
-  const goTab = (id: typeof activeTab) => {
-    setActiveTab(id);
-    if (typeof window !== 'undefined' && window.location.hash.slice(1) !== id) {
-      window.location.hash = id;
-    }
-  };
+  const goTab = (id: TabId) => setActiveTab(id);
 
   const navItems = [
     { id: 'dashboard' as const, label: 'Resumen', icon: LayoutDashboard, desc: 'Visión general' },
