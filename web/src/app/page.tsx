@@ -759,9 +759,16 @@ export default function Home() {
                           <div>
                             <h3 className="text-sm font-bold text-gray-900 dark:text-white">Horas-Hombre por Causa Raíz</h3>
                             <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">HH = personas × tiempo · dónde se concentra el esfuerzo</p>
-                            <HowCalc>
-                              <p><strong>HH (Horas-Hombre)</strong> = Cant. Personas × Tiempo (h) de cada tarea. Se suma por causa raíz y se ordena de mayor a menor — indica dónde se concentra el esfuerzo del equipo.</p>
-                            </HowCalc>
+                            <HowCalc
+                              que="Horas-Hombre (HH) acumuladas por causa raíz; muestra en qué tipo de problema se concentra el esfuerzo (top 8 causas)."
+                              formula={'HH (tarea) = Personas × Tiempo (h)\nHH (causa) = Σ HH de las tareas de esa causa'}
+                              pasos={[
+                                'Para cada tarea se calcula HH = personas × tiempo.',
+                                'Se agrupan las tareas por su causa raíz y se suman las HH.',
+                                'Se ordenan de mayor a menor y se muestran las 8 primeras.',
+                              ]}
+                              leer="Las causas con más HH son las que más mano de obra consumen — candidatas a prevención o mejora de procesos."
+                            />
                           </div>
                           <div className="text-right shrink-0">
                             <span className="block text-2xl font-extrabold text-gray-900 dark:text-white tracking-tight">{dashboardData.totalHH?.toLocaleString()}</span>
@@ -846,10 +853,17 @@ export default function Home() {
                             </AreaChart>
                           </ResponsiveContainer>
                         </div>
-                        <HowCalc>
-                          <p>El histórico se proyecta con <strong>Holt-Winters</strong> (suavizado exponencial) en el microservicio; si no está disponible, cae a una <strong>regresión lineal</strong> baseline.</p>
-                          <p>La <strong>banda</strong> = proyección ± <strong>1.28·σ·√h</strong> (σ = desviación estándar del histórico, h = meses adelante). La incertidumbre crece con el horizonte (√h). Rango orientativo (~80%), no un intervalo exacto.</p>
-                        </HowCalc>
+                        <HowCalc
+                          que={<>Serie mensual de <strong>HH</strong> (o nº de tareas): histórico (línea sólida) y proyección a futuro (punteada) con banda de incertidumbre.</>}
+                          formula={'proyección: Holt-Winters (suavizado exponencial)\nbanda = proyección ± 1.28 · σ · √h'}
+                          pasos={[
+                            'El microservicio proyecta con Holt-Winters; si no está disponible, usa una regresión lineal baseline.',
+                            'σ = desviación estándar del histórico; h = nº de meses hacia adelante.',
+                            'La banda se ensancha con √h: a mayor horizonte, más incertidumbre.',
+                          ]}
+                          leer="La línea punteada es el valor más probable; la banda (~80%) es el rango esperado. Úsala para anticipar picos y dimensionar cuadrillas."
+                          nota="Rango orientativo, no un intervalo de confianza exacto."
+                        />
                       </div>
                     )}
                     {activeTab === 'productividad' && (
@@ -915,9 +929,16 @@ export default function Home() {
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">Mermas · Consumo por HH</h3>
                           <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Intensidad de consumo, no total bruto</p>
-                          <HowCalc>
-                            <p><strong>Intensidad = Cantidad de insumo ⁄ HH</strong> (consumo por hora-hombre). Mide cuánto material se gasta por unidad de esfuerzo, no el total bruto — sirve para detectar uso anormal o mermas. Se incluyen insumos con ≥10 HH acumulado.</p>
-                          </HowCalc>
+                          <HowCalc
+                            que="Intensidad de consumo de cada insumo: cuánto material se gasta por unidad de esfuerzo (no el total bruto)."
+                            formula="Intensidad = Cantidad consumida ⁄ HH"
+                            pasos={[
+                              'Por insumo se suma la cantidad consumida y las HH de las tareas donde se usó.',
+                              'Se divide cantidad ⁄ HH para obtener el consumo por hora-hombre.',
+                              'Se incluyen solo insumos con ≥ 10 HH acumulado (para evitar ruido).',
+                            ]}
+                            leer="Una intensidad alta indica mucho material por hora trabajada: posible uso anormal, desperdicio o merma a revisar."
+                          />
                         </div>
                         <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
                           {dashboardData.mermas.length === 0 ? (
@@ -975,9 +996,16 @@ export default function Home() {
                             </div>
                           )}
                         </div>
-                        <HowCalc>
-                          <p>Por insumo, el histórico mensual se proyecta con <strong>Holt-Winters</strong> (vía microservicio); la <strong>banda</strong> = proyección ± <strong>1.28·σ·√h</strong> (σ = desviación estándar del histórico, h = meses adelante). Úsala como rango para definir el <strong>stock de seguridad</strong>.</p>
-                        </HowCalc>
+                        <HowCalc
+                          que="Consumo mensual histórico del insumo seleccionado y su proyección a futuro con banda de incertidumbre."
+                          formula={'proyección: Holt-Winters (suavizado exponencial)\nbanda = proyección ± 1.28 · σ · √h'}
+                          pasos={[
+                            'El microservicio proyecta el consumo del insumo elegido con Holt-Winters.',
+                            'σ = desviación estándar del histórico; h = nº de meses hacia adelante.',
+                            'La banda se ensancha con √h (más incertidumbre a mayor horizonte).',
+                          ]}
+                          leer="Toma el borde superior de la banda como referencia para definir el stock de seguridad y evitar quiebres."
+                        />
                       </div>
                     )}
 
@@ -1084,9 +1112,17 @@ export default function Home() {
                             <ShieldCheck className="h-4 w-4 text-teal-500" /> Cumplimiento ANS
                           </h3>
                           <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">% de tareas dentro del objetivo de horas (col. Tiempo)</p>
-                          <HowCalc>
-                            <p><strong>Cumplimiento = (tareas con Tiempo ≤ objetivo ⁄ total con tiempo) × 100</strong>. Objetivos: Incidente ≤ 3 h, Requerimiento ≤ 4 h. Usa la columna Tiempo como esfuerzo de resolución (no fechas).</p>
-                          </HowCalc>
+                          <HowCalc
+                            que="Porcentaje de tareas atendidas dentro del objetivo de horas (nivel de servicio)."
+                            formula="Cumplimiento = (tareas con Tiempo ≤ objetivo ⁄ total con tiempo) × 100"
+                            pasos={[
+                              'Objetivos por tipo: Incidente ≤ 3 h, Requerimiento ≤ 4 h.',
+                              'Se cuentan las tareas (con tiempo registrado) cuyo Tiempo ≤ su objetivo.',
+                              'Se divide entre el total de tareas con tiempo y se multiplica por 100.',
+                            ]}
+                            leer="Mayor porcentaje = mejor cumplimiento del nivel de servicio acordado."
+                            nota="Usa la columna Tiempo como esfuerzo de resolución (no fechas de inicio/fin)."
+                          />
                         </div>
                         <div className="text-center py-1">
                           <span className="text-4xl font-extrabold text-teal-600 dark:text-teal-400">{dashboardData.sla.pct}%</span>
@@ -1147,10 +1183,17 @@ export default function Home() {
                       </ScatterChart>
                     </ResponsiveContainer>
                   </div>
-                  <HowCalc>
-                    <p>Cada punto es una tarea: X = <strong>Personas</strong>, Y = <strong>Tiempo (h)</strong>, y el tamaño del punto ∝ <strong>HH = Personas × Tiempo</strong>.</p>
-                    <p><strong>r</strong> = correlación de Pearson = Σ(xᵢ−x̄)(yᵢ−ȳ) ⁄ √(Σ(xᵢ−x̄)²·Σ(yᵢ−ȳ)²); va de −1 a 1 (0 ≈ sin relación). Se calcula sobre tareas con personas y tiempo positivos.</p>
-                  </HowCalc>
+                  <HowCalc
+                    que={<>Cada punto es una tarea: eje X = nº de <strong>personas</strong>, eje Y = <strong>tiempo</strong> (h), y el tamaño del punto ∝ <strong>HH</strong>. El color distingue Incidente y Requerimiento.</>}
+                    formula={'HH = Personas × Tiempo\nr (Pearson) = Σ(xᵢ−x̄)(yᵢ−ȳ) ⁄ √(Σ(xᵢ−x̄)²·Σ(yᵢ−ȳ)²)'}
+                    pasos={[
+                      'Se toman las tareas con personas y tiempo mayores que 0.',
+                      'Cada tarea se ubica por (personas, tiempo) y se dimensiona por HH.',
+                      'Se calcula el coeficiente de correlación de Pearson (r) entre personas y tiempo.',
+                    ]}
+                    leer={<><strong>r</strong> va de −1 a 1: ≈0 sin relación lineal; &gt;0 a más personas más tiempo; &lt;0 lo contrario. Los puntos alejados de la nube son tareas atípicas (mucho esfuerzo).</>}
+                    nota="Se grafican hasta 2.000 tareas."
+                  />
                 </div>
 
                 {/* Boxplot Tiempo por Subsistema */}
@@ -1161,10 +1204,18 @@ export default function Home() {
                     <SubsistemaGlosario />
                   </div>
                   <BoxPlot data={dashboardData.boxTiempoSub || []} unit="horas" color="#2dd4bf" dark={theme === 'dark'} height={300} />
-                  <HowCalc>
-                    <p>Por subsistema se ordenan los tiempos y se obtienen los cuartiles por interpolación: <strong>Q1</strong> (25%), <strong>mediana</strong> (50%), <strong>Q3</strong> (75%). La caja va de Q1 a Q3 (IQR = Q3 − Q1).</p>
-                    <p>Los bigotes llegan al dato más extremo dentro de <strong>1.5×IQR</strong>; los puntos fuera son <strong>atípicos</strong>. El rombo es la media. Mínimo 5 tareas por subsistema.</p>
-                  </HowCalc>
+                  <HowCalc
+                    que="Distribución del tiempo (horas) de las tareas, una caja por subsistema."
+                    formula={'IQR = Q3 − Q1\nbigotes = [ Q1 − 1.5·IQR ,  Q3 + 1.5·IQR ]'}
+                    pasos={[
+                      'Se ordenan los tiempos de cada subsistema.',
+                      'Se obtienen Q1 (25%), mediana (50%) y Q3 (75%) por interpolación.',
+                      'La caja va de Q1 a Q3; la línea es la mediana y el rombo la media.',
+                      'Los bigotes llegan al dato más extremo dentro de 1.5·IQR; lo de afuera son atípicos.',
+                    ]}
+                    leer="La altura de la caja indica variabilidad; compara las medianas entre subsistemas. Muchos atípicos arriba = tareas que se disparan en tiempo."
+                    nota="Solo subsistemas con ≥ 5 tareas."
+                  />
                 </div>
 
                 {/* Boxplot HH por Tipo */}
@@ -1174,9 +1225,16 @@ export default function Home() {
                     <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Incidente vs. Requerimiento — compara el esfuerzo (Horas-Hombre)</p>
                   </div>
                   <BoxPlot data={dashboardData.boxHHTipo || []} unit="HH" color="#8b5cf6" dark={theme === 'dark'} height={300} />
-                  <HowCalc>
-                    <p>Igual que el boxplot anterior pero sobre <strong>HH = Personas × Tiempo</strong>, separando <strong>Incidente</strong> y <strong>Requerimiento</strong>. Compara mediana y dispersión del esfuerzo entre ambos tipos.</p>
-                  </HowCalc>
+                  <HowCalc
+                    que="Distribución de Horas-Hombre (HH) comparando Incidente vs Requerimiento."
+                    formula={'HH = Personas × Tiempo\nIQR = Q3 − Q1'}
+                    pasos={[
+                      'Se agrupan las tareas por tipo (Incidente / Requerimiento).',
+                      'En cada grupo se calculan los cuartiles de HH (Q1, mediana, Q3) y la media.',
+                      'Caja = Q1–Q3, bigotes = 1.5·IQR, puntos = atípicos.',
+                    ]}
+                    leer="Compara la mediana (esfuerzo típico) y la dispersión entre ambos tipos: cajas más altas = más variabilidad."
+                  />
                 </div>
 
                 {/* Histograma de Tiempo */}
@@ -1196,9 +1254,16 @@ export default function Home() {
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
-                  <HowCalc>
-                    <p>Se toma el rango del Tiempo (mín–máx) y se divide en <strong>12 intervalos iguales</strong> (bins). Cada barra cuenta cuántas tareas caen en ese rango — muestra la forma de la distribución (concentración, cola larga, etc.).</p>
-                  </HowCalc>
+                  <HowCalc
+                    que="Frecuencia de tareas según su duración (horas)."
+                    formula={'ancho_bin = (máx − mín) ⁄ 12\nbin(t) = ⌊ (t − mín) ⁄ ancho_bin ⌋'}
+                    pasos={[
+                      'Se toma el rango de tiempos (mínimo a máximo).',
+                      'Se divide en 12 intervalos iguales (bins).',
+                      'Cada barra cuenta cuántas tareas caen en ese intervalo.',
+                    ]}
+                    leer="La forma muestra si las duraciones se concentran en un pico o tienen cola larga (pocas tareas muy largas)."
+                  />
                 </div>
 
                 {/* Pareto de causas */}
@@ -1221,10 +1286,16 @@ export default function Home() {
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
-                  <HowCalc>
-                    <p>Las causas se ordenan de mayor a menor nº de tareas (top 10 + “Otros”). Las barras son el conteo; la línea es el <strong>% acumulado</strong> = (suma de tareas hasta esa causa ⁄ total) × 100.</p>
-                    <p>Aplica el principio <strong>80/20</strong>: las primeras causas (donde la línea sube rápido) concentran la mayor parte de las intervenciones.</p>
-                  </HowCalc>
+                  <HowCalc
+                    que="Causas ordenadas por nº de tareas (barras) junto con el porcentaje acumulado (línea)."
+                    formula="% acumulado (causa k) = (Σ tareas de las causas 1..k ⁄ total) × 100"
+                    pasos={[
+                      'Se cuentan las tareas por causa raíz y se ordenan de mayor a menor.',
+                      'Se muestran las 10 primeras; el resto se agrupa en “Otros”.',
+                      'La línea acumula el porcentaje hasta llegar a 100%.',
+                    ]}
+                    leer="Principio 80/20: donde la línea sube rápido están las pocas causas que explican la mayoría de las tareas — prioriza esas."
+                  />
                 </div>
 
                 {/* Mapa de calor Nivel x Subsistema */}
@@ -1235,9 +1306,16 @@ export default function Home() {
                     <SubsistemaGlosario />
                   </div>
                   <Heatmap rows={dashboardData.heatNivelSub?.rows || []} cols={dashboardData.heatNivelSub?.cols || []} matrix={dashboardData.heatNivelSub?.matrix || []} max={dashboardData.heatNivelSub?.max || 1} dark={theme === 'dark'} />
-                  <HowCalc>
-                    <p>Cada celda cuenta las tareas en ese <strong>Nivel × Subsistema</strong>. El color es proporcional al valor (más oscuro = más tareas), escalado al máximo de la matriz. Se muestran los 10 niveles con más actividad.</p>
-                  </HowCalc>
+                  <HowCalc
+                    que="Matriz de conteo de tareas por Nivel (filas) × Subsistema (columnas)."
+                    formula="intensidad_color = valor_celda ⁄ valor_máximo_de_la_matriz"
+                    pasos={[
+                      'Se cuentan las tareas para cada combinación Nivel × Subsistema.',
+                      'Se eligen los 10 niveles con más actividad.',
+                      'El color de cada celda es proporcional a su valor (más oscuro = más tareas).',
+                    ]}
+                    leer="Las celdas más oscuras señalan dónde y en qué tecnología se concentran las intervenciones (puntos calientes)."
+                  />
                 </div>
 
                 {/* % Incidentes vs Requerimientos por mes */}
@@ -1259,10 +1337,15 @@ export default function Home() {
                       </AreaChart>
                     </ResponsiveContainer>
                   </div>
-                  <HowCalc>
-                    <p>Por mes se cuentan <strong>Incidentes</strong> y <strong>Requerimientos</strong> y se normaliza a 100% (cada banda = su proporción del total del mes).</p>
-                    <p>Más incidentes ⇒ trabajo <strong>correctivo</strong> (reactivo); más requerimientos ⇒ trabajo <strong>evolutivo</strong> (mejoras/instalaciones).</p>
-                  </HowCalc>
+                  <HowCalc
+                    que="Proporción mensual de Incidentes vs Requerimientos (área 100% apilada)."
+                    formula="% tipo (mes) = (tareas del tipo ⁄ total del mes) × 100"
+                    pasos={[
+                      'Por mes se cuentan los Incidentes y los Requerimientos.',
+                      'Cada banda se normaliza a 100% del total de ese mes.',
+                    ]}
+                    leer={<>Más incidentes = trabajo <strong>correctivo</strong> (reactivo); más requerimientos = trabajo <strong>evolutivo</strong> (mejoras/instalaciones). Tendencia creciente de incidentes = se está “apagando incendios”.</>}
+                  />
                 </div>
 
                 {/* Radar por subsistema */}
@@ -1285,10 +1368,15 @@ export default function Home() {
                       </RadarChart>
                     </ResponsiveContainer>
                   </div>
-                  <HowCalc>
-                    <p>Por subsistema se calcula el <strong>% de tareas</strong> (tareas ⁄ máximo entre subsistemas × 100) y el <strong>% de HH</strong> (HH ⁄ máximo × 100). Cada métrica se normaliza a su propio máximo para compararlas en los mismos ejes.</p>
-                    <p>Cuando la banda ámbar (HH) sobresale de la verde (tareas), ese subsistema consume <strong>más esfuerzo por tarea</strong> de lo habitual.</p>
-                  </HowCalc>
+                  <HowCalc
+                    que="Comparación por subsistema de su % de tareas y su % de HH (cada eje es un subsistema)."
+                    formula={'%Tareas = tareas_sub ⁄ máx(tareas) × 100\n%HH = HH_sub ⁄ máx(HH) × 100'}
+                    pasos={[
+                      'Por subsistema se suman las tareas y las HH.',
+                      'Cada métrica se normaliza a su propio máximo (escala 0–100) para compararlas en los mismos ejes.',
+                    ]}
+                    leer="Si la banda de HH (ámbar) sobresale de la de tareas (verde) en un subsistema, ese consume más esfuerzo por tarea de lo normal."
+                  />
                 </div>
 
                 {/* Dispersión HH vs nº de insumos */}
@@ -1312,10 +1400,15 @@ export default function Home() {
                       </ScatterChart>
                     </ResponsiveContainer>
                   </div>
-                  <HowCalc>
-                    <p>Cada punto es una actividad: X = <strong>nº de insumos</strong> (líneas de material), Y = <strong>HH</strong> = Personas × Tiempo. Solo actividades con material y HH &gt; 0.</p>
-                    <p>Los puntos arriba‑derecha combinan <strong>mucho material y mucho esfuerzo</strong> — candidatas a estandarizar o revisar.</p>
-                  </HowCalc>
+                  <HowCalc
+                    que={<>Cada punto es una actividad: eje X = <strong>nº de insumos</strong> (líneas de material), eje Y = <strong>HH</strong>.</>}
+                    formula="HH = Personas × Tiempo"
+                    pasos={[
+                      'Se toman las actividades con al menos un insumo y HH > 0.',
+                      'Cada actividad se ubica por (nº de insumos, HH) y se colorea por tipo.',
+                    ]}
+                    leer="Los puntos arriba-derecha combinan mucho material y mucho esfuerzo — candidatas a estandarizar o revisar."
+                  />
                 </div>
               </div>
             )}
