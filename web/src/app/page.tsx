@@ -70,6 +70,7 @@ import {
 import { BoxPlot } from '@/components/BoxPlot';
 import { HowCalc } from '@/components/HowCalc';
 import { Heatmap } from '@/components/Heatmap';
+import { SubsistemaGlosario } from '@/components/SubsistemaGlosario';
 
 const VALID_TABS = ['dashboard', 'productividad', 'inventario', 'mantenimiento', 'estadisticas', 'ingesta', 'tasks'] as const;
 type TabId = typeof VALID_TABS[number];
@@ -653,7 +654,7 @@ export default function Home() {
                     <Filter className="h-3.5 w-3.5" /> Filtros
                   </span>
                   {[
-                    { key: 'subsistema', label: 'Subsistema', opts: ['DAT', 'CCTV', 'RAD', 'TEL', 'GEO', 'FO', 'WIFI'].map(v => ({ v, l: v })) },
+                    { key: 'subsistema', label: 'Subsistema', opts: ([['DAT', 'Datos'], ['CCTV', 'Cámaras'], ['RAD', 'Radio'], ['TEL', 'Teléfono'], ['GEO', 'Geomecánica'], ['FO', 'Fibra óptica'], ['WIFI', 'WiFi']] as [string, string][]).map(([v, n]) => ({ v, l: `${v} · ${n}` })) },
                     { key: 'tipo', label: 'Tipo', opts: [{ v: 'Incidente', l: 'Incidente' }, { v: 'Requerimiento', l: 'Requerimiento' }] },
                     { key: 'origen', label: 'Origen', opts: [{ v: 'IM', l: 'Interior Mina' }, { v: 'SUP', l: 'Superficie' }] },
                   ].map(f => (
@@ -715,6 +716,7 @@ export default function Home() {
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">Tareas por Subsistema</h3>
                           <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Por tipo de infraestructura</p>
+                          <SubsistemaGlosario />
                         </div>
                         <div className="h-56 w-full flex items-center justify-center">
                           <ResponsiveContainer width="100%" height="100%">
@@ -1156,6 +1158,7 @@ export default function Home() {
                   <div>
                     <h3 className="text-sm font-bold text-gray-900 dark:text-white">Distribución de Tiempo (h) por Subsistema</h3>
                     <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Caja = Q1–Q3 · línea = mediana · rombo = media · puntos = atípicos</p>
+                    <SubsistemaGlosario />
                   </div>
                   <BoxPlot data={dashboardData.boxTiempoSub || []} unit="horas" color="#2dd4bf" dark={theme === 'dark'} height={300} />
                   <HowCalc>
@@ -1229,6 +1232,7 @@ export default function Home() {
                   <div>
                     <h3 className="text-sm font-bold text-gray-900 dark:text-white">Mapa de calor · Nivel × Subsistema</h3>
                     <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Dónde y en qué tecnología se concentran las intervenciones</p>
+                    <SubsistemaGlosario />
                   </div>
                   <Heatmap rows={dashboardData.heatNivelSub?.rows || []} cols={dashboardData.heatNivelSub?.cols || []} matrix={dashboardData.heatNivelSub?.matrix || []} max={dashboardData.heatNivelSub?.max || 1} dark={theme === 'dark'} />
                   <HowCalc>
@@ -1266,6 +1270,7 @@ export default function Home() {
                   <div>
                     <h3 className="text-sm font-bold text-gray-900 dark:text-white">Radar · Subsistema (Tareas vs HH)</h3>
                     <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Dónde el esfuerzo no acompaña al nº de tareas</p>
+                    <SubsistemaGlosario />
                   </div>
                   <div className="h-80 w-full">
                     <ResponsiveContainer width="100%" height="100%">
