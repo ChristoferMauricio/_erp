@@ -171,6 +171,16 @@ function buildHistogram(values: number[], bins: number) {
   return counts.map((c, i) => ({ rango: `${r(min + i * width)}–${r(min + (i + 1) * width)}`, count: c }));
 }
 
+// Pareto: ordena de mayor a menor, agrupa la cola en 'Otros' y añade el % acumulado.
+function paretoFrom(pairs: [string, number][], topN = 10) {
+  const arr = [...pairs].sort((a, b) => b[1] - a[1]);
+  const total = arr.reduce((s, x) => s + x[1], 0) || 1;
+  const rest = arr.slice(topN).reduce((s, x) => s + x[1], 0);
+  const base: [string, number][] = rest > 0 ? [...arr.slice(0, topN), ['Otros', rest]] : arr.slice(0, topN);
+  let acc = 0;
+  return base.map(([name, count]) => { acc += count; return { name, count: Math.round(count * 100) / 100, acumulado: Math.round((acc / total) * 1000) / 10 }; });
+}
+
 // Desviación estándar muestral (para las bandas de confianza de las predicciones)
 function stddev(values: number[]) {
   const v = values.filter(x => typeof x === 'number' && !isNaN(x));
@@ -309,13 +319,10 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     corrPersonasTiempo = (dx > 0 && dy > 0) ? Math.round((num / Math.sqrt(dx * dy)) * 100) / 100 : 0;
   }
 
-  // Pareto de Causa Raíz (top 10 + 'Otros') con % acumulado
-  const _causaArr = Object.entries(causaMap).map(([name, v]) => ({ name, count: v.count })).sort((a, b) => b.count - a.count);
-  const _totalCausa = _causaArr.reduce((s, x) => s + x.count, 0) || 1;
-  const _restCausa = _causaArr.slice(10).reduce((s, x) => s + x.count, 0);
-  const _paretoBase = _restCausa > 0 ? [..._causaArr.slice(0, 10), { name: 'Otros', count: _restCausa }] : _causaArr.slice(0, 10);
-  let _acc = 0;
-  const paretoCausas = _paretoBase.map(x => { _acc += x.count; return { name: x.name, count: x.count, acumulado: Math.round((_acc / _totalCausa) * 1000) / 10 }; });
+  // Pareto (top 10 + 'Otros') con % acumulado — causas, insumos y ubicaciones
+  const paretoCausas = paretoFrom(Object.entries(causaMap).map(([n, v]) => [n, v.count] as [string, number]), 10);
+  const paretoInsumos = paretoFrom(Object.entries(insumosCountMap) as [string, number][], 10);
+  const paretoZonas = paretoFrom(Object.entries(locationFaultsMap) as [string, number][], 10);
 
   // Mapa de calor Nivel × Subsistema (top 10 niveles por volumen)
   const _subOrder = ['DAT', 'CCTV', 'RAD', 'TEL', 'GEO', 'FO', 'WIFI'];
@@ -414,7 +421,7 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     hhPorCausa, hhPorNivel, causaDetalle, mermas, materialesResumen, cargaProyeccion,
     insumoNames, suministros, sla,
     dispersion, boxTiempoSub, boxHHTipo, histTiempo, corrPersonasTiempo,
-    paretoCausas, heatNivelSub, radarSub, dispersionInsumos,
+    paretoCausas, paretoInsumos, paretoZonas, heatNivelSub, radarSub, dispersionInsumos,
     originDistribution: [
       { name: 'Interior Mina', value: originCountMap.IM },
       { name: 'Superficie', value: originCountMap.SUP }
