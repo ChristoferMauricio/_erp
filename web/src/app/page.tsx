@@ -790,6 +790,25 @@ export default function Home() {
                       </div>
                     )}
                     {activeTab === 'productividad' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white">Pareto · HH por Causa (80/20)</h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Pocas causas concentran la mayor parte del esfuerzo (Horas-Hombre)</p>
+                        </div>
+                        <ParetoChart data={dashboardData.paretoHHCausa || []} barName="HH" barColor="#8b5cf6" gridStroke={gridStroke} axisStroke={axisStroke} tooltipStyle={tooltipStyle} />
+                        <HowCalc
+                          que="Causas ordenadas por Horas-Hombre acumuladas (barras) junto con el % acumulado (línea)."
+                          formula={'HH = Personas × Tiempo\n% acumulado (causa k) = (Σ HH de las causas 1..k ⁄ total HH) × 100'}
+                          pasos={[
+                            'Se suma el HH de las tareas por causa raíz.',
+                            'Se ordenan de mayor a menor; top 10 + “Otros”.',
+                            'La línea acumula el porcentaje del esfuerzo hasta 100%.',
+                          ]}
+                          leer="A diferencia del Pareto por nº de tareas, este pondera por esfuerzo: revela las causas que, aunque sean pocas, consumen la mayor parte de la mano de obra."
+                        />
+                      </div>
+                    )}
+                    {activeTab === 'productividad' && (
                       <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 space-y-4">
                         <div>
                           <h3 className="text-sm font-bold text-gray-900 dark:text-white">HH por Nivel</h3>
@@ -956,6 +975,26 @@ export default function Home() {
 
                     {activeTab === 'inventario' && (
                       <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-3 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white">Pareto · Consumo de Insumos (80/20)</h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Pocos insumos concentran la mayor parte del consumo — prioriza compras y stock</p>
+                        </div>
+                        <ParetoChart data={dashboardData.paretoInsumos || []} barName="Cantidad" barColor="#3b82f6" gridStroke={gridStroke} axisStroke={axisStroke} tooltipStyle={tooltipStyle} />
+                        <HowCalc
+                          que="Insumos ordenados por cantidad total consumida (barras) junto con el % acumulado (línea)."
+                          formula="% acumulado (insumo k) = (Σ cantidad de los insumos 1..k ⁄ total) × 100"
+                          pasos={[
+                            'Se suma la cantidad consumida por insumo.',
+                            'Se ordenan de mayor a menor; top 10 + “Otros”.',
+                            'La línea acumula el porcentaje hasta 100%.',
+                          ]}
+                          leer="Los primeros insumos (donde la línea sube rápido) concentran la mayor parte del consumo — priorízalos en compras y stock de seguridad."
+                          nota="Suma cantidades de distintas unidades (UN/M/LT); úsalo como referencia relativa de volumen."
+                        />
+                      </div>
+                    )}
+                    {activeTab === 'inventario' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-3 space-y-4">
                         <div className="flex justify-between items-start gap-3 flex-wrap">
                           <div>
                             <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
@@ -1067,6 +1106,25 @@ export default function Home() {
                             </div>
                           ))}
                         </div>
+                      </div>
+                    )}
+                    {activeTab === 'mantenimiento' && (
+                      <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
+                        <div>
+                          <h3 className="text-sm font-bold text-gray-900 dark:text-white">Pareto · Ubicaciones (80/20)</h3>
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Pocas ubicaciones concentran la mayoría de las intervenciones — puntos crónicos</p>
+                        </div>
+                        <ParetoChart data={dashboardData.paretoZonas || []} barName="Intervenciones" barColor="#f43f5e" gridStroke={gridStroke} axisStroke={axisStroke} tooltipStyle={tooltipStyle} />
+                        <HowCalc
+                          que="Ubicaciones (Nivel › Zona) ordenadas por nº de intervenciones (barras) junto con el % acumulado (línea)."
+                          formula="% acumulado (ubicación k) = (Σ intervenciones 1..k ⁄ total) × 100"
+                          pasos={[
+                            'Se cuentan las intervenciones por ubicación (Nivel › Zona).',
+                            'Se ordenan de mayor a menor; top 10 + “Otros”.',
+                            'La línea acumula el porcentaje hasta 100%.',
+                          ]}
+                          leer="Las primeras ubicaciones son los puntos crónicos que concentran la mayoría de las intervenciones — candidatos a rediseño o mantenimiento preventivo."
+                        />
                       </div>
                     )}
                     {activeTab === 'mantenimiento' && (
@@ -1296,45 +1354,6 @@ export default function Home() {
                       'La línea acumula el porcentaje hasta llegar a 100%.',
                     ]}
                     leer="Principio 80/20: donde la línea sube rápido están las pocas causas que explican la mayoría de las tareas — prioriza esas."
-                  />
-                </div>
-
-                {/* Pareto de insumos */}
-                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Pareto · Consumo de Insumos (80/20)</h3>
-                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Pocos insumos concentran la mayor parte del consumo — prioriza compras y stock</p>
-                  </div>
-                  <ParetoChart data={dashboardData.paretoInsumos || []} barName="Cantidad" barColor="#3b82f6" gridStroke={gridStroke} axisStroke={axisStroke} tooltipStyle={tooltipStyle} />
-                  <HowCalc
-                    que="Insumos ordenados por cantidad total consumida (barras) junto con el % acumulado (línea)."
-                    formula="% acumulado (insumo k) = (Σ cantidad de los insumos 1..k ⁄ total) × 100"
-                    pasos={[
-                      'Se suma la cantidad consumida por insumo.',
-                      'Se ordenan de mayor a menor; se muestran los 10 primeros y el resto en “Otros”.',
-                      'La línea acumula el porcentaje hasta llegar a 100%.',
-                    ]}
-                    leer="Los primeros insumos (donde la línea sube rápido) concentran la mayor parte del consumo — priorízalos en compras y stock de seguridad."
-                    nota="Suma cantidades de distintas unidades (UN/M/LT); úsalo como referencia relativa de volumen."
-                  />
-                </div>
-
-                {/* Pareto de ubicaciones */}
-                <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-gray-900 dark:text-white">Pareto · Ubicaciones (80/20)</h3>
-                    <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">Pocas ubicaciones concentran la mayoría de las intervenciones — puntos crónicos</p>
-                  </div>
-                  <ParetoChart data={dashboardData.paretoZonas || []} barName="Intervenciones" barColor="#f43f5e" gridStroke={gridStroke} axisStroke={axisStroke} tooltipStyle={tooltipStyle} />
-                  <HowCalc
-                    que="Ubicaciones (Nivel › Zona) ordenadas por nº de intervenciones (barras) junto con el % acumulado (línea)."
-                    formula="% acumulado (ubicación k) = (Σ intervenciones 1..k ⁄ total) × 100"
-                    pasos={[
-                      'Se cuentan las intervenciones por ubicación (Nivel › Zona).',
-                      'Se ordenan de mayor a menor; top 10 + “Otros”.',
-                      'La línea acumula el porcentaje hasta llegar a 100%.',
-                    ]}
-                    leer="Las primeras ubicaciones son los puntos crónicos que concentran la mayoría de las intervenciones — candidatos a rediseño o mantenimiento preventivo."
                   />
                 </div>
 

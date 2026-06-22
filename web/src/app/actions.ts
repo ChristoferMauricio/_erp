@@ -321,6 +321,7 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
 
   // Pareto (top 10 + 'Otros') con % acumulado — causas, insumos y ubicaciones
   const paretoCausas = paretoFrom(Object.entries(causaMap).map(([n, v]) => [n, v.count] as [string, number]), 10);
+  const paretoHHCausa = paretoFrom(Object.entries(causaMap).map(([n, v]) => [n, Math.round(v.hh)] as [string, number]), 10);
   const paretoInsumos = paretoFrom(Object.entries(insumosCountMap) as [string, number][], 10);
   const paretoZonas = paretoFrom(Object.entries(locationFaultsMap) as [string, number][], 10);
 
@@ -421,7 +422,7 @@ function buildDashboardFromTasks(tasks: DashTask[], source: string) {
     hhPorCausa, hhPorNivel, causaDetalle, mermas, materialesResumen, cargaProyeccion,
     insumoNames, suministros, sla,
     dispersion, boxTiempoSub, boxHHTipo, histTiempo, corrPersonasTiempo,
-    paretoCausas, paretoInsumos, paretoZonas, heatNivelSub, radarSub, dispersionInsumos,
+    paretoCausas, paretoHHCausa, paretoInsumos, paretoZonas, heatNivelSub, radarSub, dispersionInsumos,
     originDistribution: [
       { name: 'Interior Mina', value: originCountMap.IM },
       { name: 'Superficie', value: originCountMap.SUP }
