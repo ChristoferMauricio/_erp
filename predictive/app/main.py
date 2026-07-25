@@ -2,7 +2,7 @@ import os
 import re
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException, Body, Response
+from fastapi import FastAPI, HTTPException, Body, Response, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -31,7 +31,24 @@ app.add_middleware(
 
 # Conexión a Base de Datos
 DATABASE_URL = os.getenv("DATABASE_URL")
-LOCAL_EXCEL_PATH = r"d:\OneDrive_UNI\OneDrive - UNIVERSIDAD NACIONAL DE INGENIERIA\Documents\ESCRITORIO\Cris\2026\2026-1\9 Emprendimiento\_erp\Yauricocha - CORONA.xlsx"
+# Fallback de Excel SOLO para desarrollo local. Configurable por entorno; en producción
+# (Render) no se define, así que un fallo de BD da un error claro en vez de un path muerto.
+LOCAL_EXCEL_PATH = os.getenv(
+    "LOCAL_EXCEL_PATH",
+    r"d:\OneDrive_UNI\OneDrive - UNIVERSIDAD NACIONAL DE INGENIERIA\Documents\ESCRITORIO\Cris\2026\2026-1\9 Emprendimiento\_erp\Yauricocha - CORONA.xlsx",
+)
+
+# Clave compartida Vercel↔Render para proteger ingesta/export (escritura y exfiltración).
+# Compatibilidad hacia atrás: si INGEST_API_KEY NO está configurada, los endpoints siguen
+# abiertos como hasta ahora; en cuanto se define (en Render y en Vercel) se vuelve obligatoria.
+INGEST_API_KEY = os.getenv("INGEST_API_KEY")
+
+
+def require_api_key(x_api_key: Optional[str] = Header(default=None)):
+    """Exige X-API-Key SOLO si INGEST_API_KEY está configurada en el entorno."""
+    if INGEST_API_KEY and x_api_key != INGEST_API_KEY:
+        raise HTTPException(status_code=401, detail="Clave de API inválida o ausente.")
+    return True
 
 def get_connection():
     """Conexión a la BD vía pg8000 (puro Python; SSL para Supabase)."""
@@ -90,7 +107,7 @@ def health_check():
     }
 
 @app.get("/export")
-def export_xlsx(pivots: bool = True):
+def export_xlsx(pivots: bool = True, _auth: bool = Depends(require_api_key)):
     """Exporta TODO el histórico a un .xlsx: hoja Datos + hojas de agregación + PivotTables nativas.
     Con ?pivots=false devuelve la versión robusta sin dinámicas (solo Tablas)."""
     try:
@@ -400,7 +417,7 @@ def predict_mantenimiento(nivel: Optional[str] = None):
     }
 
 @app.post("/ingest/validate")
-def ingest_validate(payload: dict = Body(...)):
+def ingest_validate(payload: dict = Body(...), _auth: bool = Depends(require_api_key)):
     """Parsea las filas del Excel (modelo de bloque), valida (faltantes, duplicados,
     categorías no reconocidas con sugerencias) y devuelve una vista previa."""
     rows = payload.get("rows", []) if isinstance(payload, dict) else []
@@ -423,7 +440,7 @@ def ingest_validate(payload: dict = Body(...)):
 
 
 @app.post("/ingest/commit")
-def ingest_commit(payload: dict = Body(...)):
+def ingest_commit(payload: dict = Body(...), _auth: bool = Depends(require_api_key)):
     """Re-valida (autoritativo) e inserta a Supabase las actividades incluidas.
     Idempotente: re-subir el mismo archivo no duplica (import_hash UNIQUE)."""
     activities = payload.get("activities", []) if isinstance(payload, dict) else []

@@ -12,6 +12,7 @@ import {
   confirmarIngesta,
   exportarExcel
 } from './actions';
+import type { DashboardData } from '@/lib/dashboard-types';
 import * as XLSX from 'xlsx';
 import {
   Wrench,
@@ -131,7 +132,7 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
-  const [dashboardData, setDashboardData] = useState<any>(null);
+  const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
 
   const [tasks, setTasks] = useState<any[]>([]);
   const [totalTasks, setTotalTasks] = useState(0);
@@ -151,6 +152,10 @@ export default function Home() {
   const [insumoPred, setInsumoPred] = useState<any[] | null>(null);
   const [insumoPredLoading, setInsumoPredLoading] = useState(false);
   const [riesgoZonas, setRiesgoZonas] = useState<any[] | null>(null);
+  // Estado de error del microservicio ML (para avisar en vez de mostrar gráficos vacíos)
+  const [cargaErr, setCargaErr] = useState(false);
+  const [riesgoErr, setRiesgoErr] = useState(false);
+  const [insumoErr, setInsumoErr] = useState(false);
   // Ingesta mensual
   const [ingestResult, setIngestResult] = useState<any>(null);
   const [ingestLoading, setIngestLoading] = useState(false);
@@ -187,10 +192,12 @@ export default function Home() {
 
   useEffect(() => {
     setMounted(true);
-    fetchDashboardData(filters).then(setDashboardData);
-    fetchCargaPrediction().then(r => { if (r.ok) setCargaPred(r.data); });
-    fetchMantenimientoPrediction().then(r => { if (r.ok) setRiesgoZonas(r.data); });
+    let vigente = true;
+    fetchDashboardData(filters).then(d => { if (vigente) setDashboardData(d); });
+    fetchCargaPrediction().then(r => { if (!vigente) return; if (r.ok) { setCargaPred(r.data); setCargaErr(false); } else setCargaErr(true); });
+    fetchMantenimientoPrediction().then(r => { if (!vigente) return; if (r.ok) { setRiesgoZonas(r.data); setRiesgoErr(false); } else setRiesgoErr(true); });
     loadTasks(1, '', '', '');
+    return () => { vigente = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -209,7 +216,9 @@ export default function Home() {
   // Re-consultar el dashboard cuando cambian los filtros
   useEffect(() => {
     if (!mounted) return;
-    fetchDashboardData(filters).then(setDashboardData);
+    let vigente = true;
+    fetchDashboardData(filters).then(d => { if (vigente) setDashboardData(d); });
+    return () => { vigente = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters]);
 
@@ -224,8 +233,15 @@ export default function Home() {
   // Pedir la predicción del insumo seleccionado al microservicio
   useEffect(() => {
     if (!selectedInsumo) return;
+    let vigente = true;
     setInsumoPredLoading(true);
-    fetchInsumosPrediction(selectedInsumo).then(r => { setInsumoPred(r.data); setInsumoPredLoading(false); });
+    fetchInsumosPrediction(selectedInsumo).then(r => {
+      if (!vigente) return;
+      setInsumoPred(r.data);
+      setInsumoErr(!r.ok);
+      setInsumoPredLoading(false);
+    });
+    return () => { vigente = false; };
   }, [selectedInsumo]);
 
   const loadTasks = (page: number, searchVal: string, typeVal: string, originVal: string) => {
@@ -843,6 +859,11 @@ export default function Home() {
                             <p className="text-xs text-gray-400 dark:text-slate-500 mt-0.5">
                               {cargaMetric === 'hh' ? 'Horas-Hombre' : 'Nº de tareas'} por mes · histórico (sólido) y proyección {cargaPred ? 'Holt-Winters' : 'baseline'} (punteado)
                             </p>
+                            {cargaErr && (
+                              <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
+                                <AlertTriangle className="h-3 w-3 shrink-0" /> Microservicio ML no disponible: se muestra el baseline local. Reintenta en ~30 s (Render free puede estar despertando).
+                              </p>
+                            )}
                           </div>
                           <div className="flex bg-gray-100 dark:bg-slate-800 rounded-lg p-0.5 text-[11px] font-semibold shrink-0">
                             {(['hh', 'tareas'] as const).map(m => (
@@ -1031,8 +1052,14 @@ export default function Home() {
                               </AreaChart>
                             </ResponsiveContainer>
                           ) : (
-                            <div className="h-full flex items-center justify-center text-gray-400 dark:text-slate-500 text-sm text-center px-6">
-                              Sin histórico suficiente para <strong className="mx-1">{selectedInsumo}</strong> (o microservicio no disponible).
+                            <div className="h-full flex items-center justify-center text-sm text-center px-6">
+                              {insumoErr ? (
+                                <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
+                                  <AlertTriangle className="h-4 w-4 shrink-0" /> Microservicio ML no disponible (¿Render despertando?). Reintenta en ~30 s.
+                                </span>
+                              ) : (
+                                <span className="text-gray-400 dark:text-slate-500">Sin histórico suficiente para <strong className="mx-1">{selectedInsumo}</strong>.</span>
+                              )}
                             </div>
                           )}
                         </div>
@@ -1138,7 +1165,9 @@ export default function Home() {
                         </div>
                         <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
                           {(!riesgoZonas || riesgoZonas.length === 0) ? (
-                            <p className="text-xs text-gray-400 dark:text-slate-500 text-center py-8">Sin datos del microservicio (¿está activo?).</p>
+                            <p className={`text-xs text-center py-8 ${riesgoErr ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400 dark:text-slate-500'}`}>
+                              {riesgoErr ? '⚠ Microservicio ML no disponible (¿Render despertando?). Reintenta en ~30 s.' : 'Sin incidentes registrados para calcular el riesgo.'}
+                            </p>
                           ) : riesgoZonas.slice(0, 12).map((z: any, i: number) => {
                             const st = z.nivel_riesgo === 'Crítico'
                               ? { bar: 'bg-rose-500', badge: 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-500/20' }
@@ -1216,7 +1245,7 @@ export default function Home() {
             )}
 
             {/* ========== ESTADÍSTICAS TAB ========== */}
-            {activeTab === 'estadisticas' && (
+            {activeTab === 'estadisticas' && dashboardData && (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Dispersión */}
                 <div className="bg-white dark:bg-slate-900/80 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 lg:col-span-2 space-y-4">

@@ -29,6 +29,14 @@ if (dbUrl) {
 
 // URL del microservicio de predicción (server-to-server; no se expone al navegador)
 const PREDICTIVE_URL = process.env.PREDICTIVE_API_URL || 'http://127.0.0.1:8000';
+// Clave compartida Vercel↔Render. Si está configurada, se adjunta como X-API-Key en cada
+// llamada al microservicio (el server FastAPI la exige en /ingest y /export). Nunca llega al navegador.
+const PREDICTIVE_KEY = process.env.PREDICTIVE_API_KEY || '';
+function svcHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra || {}) };
+  if (PREDICTIVE_KEY) h['X-API-Key'] = PREDICTIVE_KEY;
+  return h;
+}
 
 // ===== Helpers de analítica de carga (compartidos por ambas rutas) =====
 
@@ -439,6 +447,7 @@ export async function fetchDashboardData(filters: DashFilters = {}) {
   if (pool) {
     try {
       const client = await pool.connect();
+      try {
       const where: string[] = [];
       const params: any[] = [];
       let pi = 1;
@@ -479,8 +488,6 @@ export async function fetchDashboardData(filters: DashFilters = {}) {
         ${whereSql}
       `, params);
 
-      client.release();
-
       const insByTask: { [k: string]: { name: string; cantidad: number; unidad: string; esLineaSeparada: boolean }[] } = {};
       insumosRes.rows.forEach((r: any) => {
         if (!insByTask[r.tarea_id]) insByTask[r.tarea_id] = [];
@@ -500,6 +507,9 @@ export async function fetchDashboardData(filters: DashFilters = {}) {
         insumos: insByTask[r.id] || []
       }));
       return buildDashboardFromTasks(tasks, 'supabase');
+      } finally {
+        client.release();
+      }
     } catch (error) {
       console.error("Error al consultar Supabase, reintentando con Excel local:", error);
     }
@@ -534,7 +544,7 @@ export async function fetchTasks(page = 1, limit = 50, search = '', typeFilter =
   if (pool) {
     try {
       const client = await pool.connect();
-      
+      try {
       let query = `
         SELECT t.id, t.ticket, ct.nombre as tipo, co.nombre as origen,
                u.nivel, u.zona, u.punto, u.texto_original as ubicacion_original,
@@ -586,50 +596,53 @@ export async function fetchTasks(page = 1, limit = 50, search = '', typeFilter =
       params.push(limit, offset);
       
       const tasksRes = await client.query(query, params);
-      
-      // Cargar insumos para cada tarea seleccionada
-      const tasksWithInsumos = await Promise.all(
-        tasksRes.rows.map(async (row: any) => {
-          const insumosRes = await client.query(`
-            SELECT i.nombre_normalizado as name, ti.cantidad::float, cum.simbolo as unidad
-            FROM tarea_insumo ti
-            JOIN insumo i ON ti.insumo_id = i.id
-            JOIN cat_unidad_medida cum ON ti.unidad_medida_id = cum.id
-            WHERE ti.tarea_id = $1
-          `, [row.id]);
-          
-          return {
-            id: row.id,
-            ticket: row.ticket,
-            tipo: row.tipo,
-            origen: row.origen,
-            ubicacion: {
-              nivel: row.nivel,
-              zona: row.zona,
-              punto: row.punto,
-              texto_original: row.ubicacion_original
-            },
-            causa_raiz: row.causa_raiz,
-            cant_personas: row.cant_personas,
-            tiempo_horas: parseFloat(row.tiempo_horas),
-            fecha_inicio: row.fecha_inicio ? row.fecha_inicio.toISOString() : null,
-            fecha_fin: row.fecha_fin ? row.fecha_fin.toISOString() : null,
-            periodo: row.periodo ? row.periodo.toISOString().substring(0, 10) : null,
-            detalle: row.detalle,
-            trabajo_realizado: row.trabajo_realizado,
-            insumos: insumosRes.rows
-          };
-        })
-      );
-      
-      client.release();
-      
+
+      // Insumos de TODA la página en UNA sola consulta (evita el N+1: antes era 1 query por tarea)
+      const ids = tasksRes.rows.map((r: any) => r.id);
+      const insByTask: { [k: string]: { name: string; cantidad: number; unidad: string }[] } = {};
+      if (ids.length) {
+        const insRes = await client.query(`
+          SELECT ti.tarea_id, i.nombre_normalizado as name, ti.cantidad::float as cantidad, cum.simbolo as unidad
+          FROM tarea_insumo ti
+          JOIN insumo i ON ti.insumo_id = i.id
+          JOIN cat_unidad_medida cum ON ti.unidad_medida_id = cum.id
+          WHERE ti.tarea_id = ANY($1)
+        `, [ids]);
+        insRes.rows.forEach((r: any) => {
+          (insByTask[r.tarea_id] = insByTask[r.tarea_id] || []).push({ name: r.name, cantidad: r.cantidad, unidad: r.unidad || 'UN' });
+        });
+      }
+
+      const tasksWithInsumos = tasksRes.rows.map((row: any) => ({
+        id: row.id,
+        ticket: row.ticket,
+        tipo: row.tipo,
+        origen: row.origen,
+        ubicacion: {
+          nivel: row.nivel,
+          zona: row.zona,
+          punto: row.punto,
+          texto_original: row.ubicacion_original
+        },
+        causa_raiz: row.causa_raiz,
+        cant_personas: row.cant_personas,
+        tiempo_horas: parseFloat(row.tiempo_horas),
+        fecha_inicio: row.fecha_inicio ? row.fecha_inicio.toISOString() : null,
+        fecha_fin: row.fecha_fin ? row.fecha_fin.toISOString() : null,
+        periodo: row.periodo ? row.periodo.toISOString().substring(0, 10) : null,
+        detalle: row.detalle,
+        trabajo_realizado: row.trabajo_realizado,
+        insumos: insByTask[row.id] || []
+      }));
+
       return {
         items: tasksWithInsumos,
         total,
         pages: Math.ceil(total / limit)
       };
-      
+      } finally {
+        client.release();
+      }
     } catch (error) {
       console.error("Error al consultar tareas en Supabase, reintentando con Excel:", error);
     }
@@ -677,7 +690,7 @@ export async function fetchTasks(page = 1, limit = 50, search = '', typeFilter =
 // Si el microservicio no responde, ok:false (la UI cae al baseline local).
 export async function fetchCargaPrediction(meses = 3) {
   try {
-    const res = await fetch(`${PREDICTIVE_URL}/predict/carga?meses_proyeccion=${meses}`, { cache: 'no-store' });
+    const res = await fetch(`${PREDICTIVE_URL}/predict/carga?meses_proyeccion=${meses}`, { cache: 'no-store', headers: svcHeaders() });
     if (!res.ok) return { ok: false, data: [] as any[] };
     const j = await res.json();
     const hist = j.historico || [];
@@ -717,7 +730,7 @@ export async function fetchInsumosPrediction(insumo: string, meses = 3) {
   try {
     const url = `${PREDICTIVE_URL}/predict/insumos?meses_proyeccion=${meses}` +
       (insumo ? `&insumo_nombre=${encodeURIComponent(insumo)}` : '');
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await fetch(url, { cache: 'no-store', headers: svcHeaders() });
     if (!res.ok) return { ok: false, insumo, data: [] as any[] };
     const j = await res.json();
     const p = (j.predictions && j.predictions[0]) || null;
@@ -753,7 +766,7 @@ export async function fetchInsumosPrediction(insumo: string, meses = 3) {
 export async function fetchMantenimientoPrediction(nivel?: string) {
   try {
     const url = `${PREDICTIVE_URL}/predict/mantenimiento` + (nivel ? `?nivel=${encodeURIComponent(nivel)}` : '');
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await fetch(url, { cache: 'no-store', headers: svcHeaders() });
     if (!res.ok) return { ok: false, data: [] as any[] };
     const j = await res.json();
     return { ok: true, data: (j.results || []) as any[] };
@@ -769,7 +782,7 @@ export async function validarIngesta(rows: any[]) {
   try {
     const res = await fetch(`${PREDICTIVE_URL}/ingest/validate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: svcHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ rows }),
       cache: 'no-store',
     });
@@ -786,7 +799,7 @@ export async function confirmarIngesta(activities: any[]) {
   try {
     const res = await fetch(`${PREDICTIVE_URL}/ingest/commit`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: svcHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ activities }),
       cache: 'no-store',
     });
@@ -805,7 +818,7 @@ export async function confirmarIngesta(activities: any[]) {
 // Exporta TODO el histórico a un .xlsx (Datos + agregaciones + PivotTables nativas) vía microservicio.
 export async function exportarExcel() {
   try {
-    const res = await fetch(`${PREDICTIVE_URL}/export`, { cache: 'no-store' });
+    const res = await fetch(`${PREDICTIVE_URL}/export`, { cache: 'no-store', headers: svcHeaders() });
     if (!res.ok) return { ok: false, error: `Microservicio respondió ${res.status}` };
     const buf = await res.arrayBuffer();
     const base64 = Buffer.from(buf).toString('base64');

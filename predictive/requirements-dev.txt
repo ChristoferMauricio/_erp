@@ -1,0 +1,3 @@
+# Dependencias solo de desarrollo/pruebas (no se instalan en Render).
+# Instalar con:  pip install -r requirements-dev.txt
+pytest>=7.0
