@@ -256,7 +256,20 @@ export function getExcelData(): TareaParsed[] {
   }
 
   if (!excelPath) {
-    console.error("No se encontró Yauricocha - CORONA.xlsx en las rutas buscadas:", possiblePaths);
+    const jsonPath = path.join(process.cwd(), 'src', 'lib', 'seed_tasks.json');
+    const jsonAltPath = path.join(process.cwd(), '..', 'web', 'src', 'lib', 'seed_tasks.json');
+    const targetJson = fs.existsSync(jsonPath) ? jsonPath : (fs.existsSync(jsonAltPath) ? jsonAltPath : '');
+    if (targetJson) {
+      try {
+        const rawJson = fs.readFileSync(targetJson, 'utf-8');
+        const tareas = JSON.parse(rawJson) as TareaParsed[];
+        cachedData = { tareas, lastUpdated: Date.now() };
+        return tareas;
+      } catch (e) {
+        console.error("Error al leer JSON de respaldo:", e);
+      }
+    }
+    console.error("No se encontró Yauricocha - CORONA.xlsx ni seed_tasks.json en las rutas buscadas");
     return [];
   }
 
