@@ -2,43 +2,74 @@ import fs from 'fs';
 import path from 'path';
 import * as XLSX from 'xlsx';
 
-// Definición de Interfaces
+// Definicines de Entidades según TdR_Sistema_KPIs_Yauricocha.md (Sección 5)
 export interface InsumoConsumo {
   name: string;
+  sku: string;
   cantidad: number;
   unidad: string;
-  // true  = fila de solo-insumo (patrón "entrega de material": sin Causa Raíz/personal/tiempo)
-  // false = insumo consumido en la misma fila de la actividad de ejecución
+  precio_unitario: number;
+  costo_total: number;
   esLineaSeparada: boolean;
 }
 
 export interface UbicacionParsed {
   nivel: string;
+  piso: string;
   zona: string;
-  punto: string | null;
+  nombre_normalizado: string;
   texto_original: string;
 }
 
-export interface TareaParsed {
-  id: string;
-  ticket: string | null;
-  tipo: 'Incidente' | 'Requerimiento';
-  area: string;
-  origen: 'IM' | 'SUP';
+export interface TicketParsed {
+  ticket_id: string;
+  codigo_registro: string; // RESGISTROS
+  fecha: string; // YYYY-MM-DD
+  tipo_registro: 'Incidente' | 'Requerimiento';
+  tipo_trabajo: 'IM' | 'SUP';
+  cantidad_personal: number;
+  duracion_horas: number;
+  horas_hombre: number; // cant_personal * duracion_horas (KPI-07)
+  descripcion_corta: string | null;
+  trabajo_realizado: string | null;
+  estado: 'Abierto' | 'Cerrado';
+  unidad_minera: string; // UM Corona
+  mina: string; // Yauricocha
+  area: string; // Infraestructura
   ubicacion: UbicacionParsed;
   causa_raiz: string;
-  cant_personas: number;
-  tiempo_horas: number;
-  horas_hombre: number; // cant_personas * tiempo_horas (RF-11)
-  fecha_inicio: string;
-  fecha_fin: string | null;
-  periodo: string | null;
-  detalle: string | null;
-  trabajo_realizado: string | null;
+  sistema: 'DAT' | 'CCTV' | 'RAD' | 'TEL' | 'GEO' | 'FO' | 'WIFI';
   insumos: InsumoConsumo[];
 }
 
-// Normalizadores e inferencias de codificación (mismo comportamiento que ingest.py)
+// Compatibilidad con TareaParsed para evitar roturas
+export type TareaParsed = TicketParsed;
+
+// Precios de referencia y SKUs para cat_insumo (TdR 5.4 / KPI-10)
+const INSUMO_SKU_PRICE_MAP: { [key: string]: { sku: string; price: number; category: string } } = {
+  'Cable UTP': { sku: 'CAB-UTP-CAT6', price: 2.28, category: 'Cableado' },
+  'Cintillos': { sku: 'ACC-CIN-100', price: 0.15, category: 'Accesorios' },
+  'Cable Leaky Feeder': { sku: 'CAB-LEAKY-01', price: 8.50, category: 'Cableado' },
+  'Cable Acometida': { sku: 'CAB-ACO-01', price: 3.20, category: 'Cableado' },
+  'Conector RJ45': { sku: 'CON-RJ45-CAT6', price: 0.50, category: 'Conectores' },
+  'Conector RJ11': { sku: 'CON-RJ11-01', price: 0.40, category: 'Conectores' },
+  'Access Point': { sku: 'EQU-WIFI-AP', price: 250.00, category: 'Equipos' },
+  'Conversor de Teléfono': { sku: 'EQU-TEL-CONV', price: 65.00, category: 'Equipos' },
+  'Cámara Dahua': { sku: 'EQU-CCTV-CAM', price: 120.00, category: 'CCTV' },
+  'Cámara Analógica': { sku: 'EQU-CCTV-ANA', price: 85.00, category: 'CCTV' },
+  'Grabador DVR': { sku: 'EQU-CCTV-DVR', price: 320.00, category: 'CCTV' },
+  'Grabador DVR 16 Ptos': { sku: 'EQU-CCTV-DVR16', price: 480.00, category: 'CCTV' },
+  'Grabador DVR 8 Ptos': { sku: 'EQU-CCTV-DVR8', price: 350.00, category: 'CCTV' },
+  'Disco Duro': { sku: 'EQU-CCTV-HDD', price: 110.00, category: 'Almacenamiento' },
+  'Disco Duro 10TB': { sku: 'EQU-CCTV-HDD10', price: 290.00, category: 'Almacenamiento' },
+  'Jack RJ45': { sku: 'CON-JACK-RJ45', price: 1.80, category: 'Conectores' },
+  'Teléfono Analógico': { sku: 'EQU-TEL-ANA', price: 45.00, category: 'Equipos' },
+  'Tubo Corrugado': { SKU: 'TUB-COR-01', price: 1.80, category: 'Canalización' } as any,
+  'Cinta Aislante': { sku: 'ACC-CIN-AIS', price: 3.00, category: 'Accesorios' },
+  'Trapo Industrial': { sku: 'ACC-TRAPO', price: 1.20, category: 'Limpieza' },
+  'Pantalla TV': { sku: 'EQU-DISP-TV', price: 350.00, category: 'Equipos' }
+};
+
 const INSUMO_CLEAN_MAP: { [key: string]: string } = {
   'cintillos': 'Cintillos',
   'cintillo': 'Cintillos',
@@ -83,7 +114,7 @@ const INSUMO_CLEAN_MAP: { [key: string]: string } = {
   'Pantalla TV ': 'Pantalla TV'
 };
 
-const CAUSE_TO_SUBSYSTEM: { [key: string]: string } = {
+const CAUSE_TO_SUBSYSTEM: { [key: string]: 'DAT' | 'CCTV' | 'RAD' | 'TEL' | 'GEO' | 'FO' | 'WIFI' } = {
   'Balun Averiado': 'CCTV',
   'Cámara Averiado': 'CCTV',
   'Teléfono Averiado': 'TEL',
@@ -141,89 +172,58 @@ function cleanTextEncoding(text: string | null | undefined): string {
 }
 
 export function parseUbicacion(text: string | null | undefined): UbicacionParsed {
-  if (!text) return { nivel: 'Interior Mina', zona: 'General', punto: null, texto_original: '' };
+  if (!text) return { nivel: 'NV 1170', piso: 'P-1', zona: 'General', nombre_normalizado: 'NV 1170 P-1 General', texto_original: '' };
   
   const textClean = cleanTextEncoding(text).trim().replace(/\.+$/, '');
   const isSuperficie = textClean.toLowerCase().includes('superficie');
   
-  let nivel = 'Interior Mina';
+  let nivel = 'NV 1170';
+  let piso = 'P-1';
   let zona = 'General';
-  let punto: string | null = null;
   
-  // Buscar nivel NV.XXXX
-  const levelMatch = textClean.match(/NV\.\s*\d+/i);
+  const levelMatch = textClean.match(/NV\.\s*\d+|NV\s*\d+/i);
   if (levelMatch) {
-    nivel = levelMatch[0].replace(/\s+/g, '').toUpperCase();
+    nivel = levelMatch[0].replace(/\./g, '').replace(/\s+/g, ' ').toUpperCase();
   } else if (isSuperficie) {
     nivel = 'Superficie';
   }
   
-  // Remover nivel del texto
+  const pisoMatch = textClean.match(/P-\d+|PISO\s*\d+/i);
+  if (pisoMatch) {
+    piso = pisoMatch[0].replace(/\s+/g, '').toUpperCase();
+  }
+
   let partsText = textClean;
-  if (levelMatch) {
-    partsText = partsText.replace(levelMatch[0], '');
-  }
-  if (isSuperficie) {
-    partsText = partsText.replace(/,?\s*superficie/i, '').replace(/superficie,?\s*/i, '');
-  }
+  if (levelMatch) partsText = partsText.replace(levelMatch[0], '');
+  if (pisoMatch) partsText = partsText.replace(pisoMatch[0], '');
+  if (isSuperficie) partsText = partsText.replace(/,?\s*superficie/i, '').replace(/superficie,?\s*/i, '');
   partsText = partsText.trim().replace(/^,|,$/g, '').trim();
   
-  // Separar partes
-  let parts: string[] = [];
-  if (partsText.includes(',')) {
-    parts = partsText.split(',').map(p => p.trim()).filter(Boolean);
-  } else {
-    parts = partsText.split(/\s{2,}/).map(p => p.trim()).filter(Boolean);
+  if (partsText) {
+    zona = partsText.replace(/\s+/g, ' ');
   }
   
-  if (parts.length === 0) {
-    zona = partsText || 'General';
-  } else if (parts.length === 1) {
-    zona = parts[0];
-  } else {
-    let pointCandidate: string | null = null;
-    const zoneParts: string[] = [];
-    
-    for (const p of parts) {
-      const isPoint = /^[P|V|T]-\d+$/i.test(p) || 
-                      ['camara', 'refugio', 'anexo', 'tolva', 'gabinete'].some(k => p.toLowerCase().includes(k));
-      if (isPoint) {
-        pointCandidate = p;
-      } else {
-        zoneParts.push(p);
-      }
-    }
-    
-    if (zoneParts.length > 0) {
-      zona = zoneParts.join(' - ');
-    } else {
-      zona = 'General';
-    }
-    
-    if (pointCandidate) {
-      punto = pointCandidate;
-    } else {
-      punto = parts[parts.length - 1];
-      zona = parts.slice(0, parts.length - 1).join(' - ');
-    }
-  }
+  const nombre_normalizado = `${nivel} ${piso} ${zona}`.trim();
   
   return {
-    nivel: nivel.replace(/\s+/g, ' ').trim(),
-    zona: zona.replace(/\s+/g, ' ').trim(),
-    punto: punto ? punto.replace(/\s+/g, ' ').trim() : null,
+    nivel,
+    piso,
+    zona,
+    nombre_normalizado,
     texto_original: text
   };
 }
 
-export function inferSubsystem(cause: string | null | undefined): string {
+export function inferSubsystem(cause: string | null | undefined): 'DAT' | 'CCTV' | 'RAD' | 'TEL' | 'GEO' | 'FO' | 'WIFI' {
   if (!cause) return 'DAT';
   const causeClean = cleanTextEncoding(cause).trim();
   const parentMatch = causeClean.match(/\(([A-Za-z\-]+)\)/);
   if (parentMatch) {
     const code = parentMatch[1].toUpperCase();
-    if (code === 'WI-FI') return 'WIFI';
-    return code;
+    if (code === 'WI-FI' || code === 'WIFI') return 'WIFI';
+    if (['DAT', 'CCTV', 'RAD', 'TEL', 'GEO', 'FO', 'WIFI'].includes(code)) {
+      return code as 'DAT' | 'CCTV' | 'RAD' | 'TEL' | 'GEO' | 'FO' | 'WIFI';
+    }
   }
   if (causeClean in CAUSE_TO_SUBSYSTEM) {
     return CAUSE_TO_SUBSYSTEM[causeClean];
@@ -231,16 +231,13 @@ export function inferSubsystem(cause: string | null | undefined): string {
   return 'DAT';
 }
 
-// Cargar y Parsear Excel local
-let cachedData: { tareas: TareaParsed[], lastUpdated: number } | null = null;
+let cachedTickets: { tickets: TicketParsed[], lastUpdated: number } | null = null;
 
-export function getExcelData(): TareaParsed[] {
-  // Caché para evitar re-parsear en cada request
-  if (cachedData && (Date.now() - cachedData.lastUpdated) < 60000) {
-    return cachedData.tareas;
+export function getExcelData(): TicketParsed[] {
+  if (cachedTickets && (Date.now() - cachedTickets.lastUpdated) < 60000) {
+    return cachedTickets.tickets;
   }
 
-  // Buscar el archivo Excel en la raíz del proyecto
   const possiblePaths = [
     path.join(process.cwd(), '..', 'Yauricocha - CORONA.xlsx'),
     path.join(process.cwd(), 'Yauricocha - CORONA.xlsx'),
@@ -262,9 +259,9 @@ export function getExcelData(): TareaParsed[] {
     if (targetJson) {
       try {
         const rawJson = fs.readFileSync(targetJson, 'utf-8');
-        const tareas = JSON.parse(rawJson) as TareaParsed[];
-        cachedData = { tareas, lastUpdated: Date.now() };
-        return tareas;
+        const tickets = JSON.parse(rawJson) as TicketParsed[];
+        cachedTickets = { tickets, lastUpdated: Date.now() };
+        return tickets;
       } catch (e) {
         console.error("Error al leer JSON de respaldo:", e);
       }
@@ -279,29 +276,21 @@ export function getExcelData(): TareaParsed[] {
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
     
-    // Convertir a JSON crudo (array de arrays o filas)
     const rawData = XLSX.utils.sheet_to_json(worksheet, { defval: null }) as any[];
-    
-    const tareas: TareaParsed[] = [];
-    let currentTask: TareaParsed | null = null;
+    const tickets: TicketParsed[] = [];
+    let currentTicket: TicketParsed | null = null;
     
     for (let idx = 0; idx < rawData.length; idx++) {
       const row = rawData[idx];
-      
-      // Encontrar columna Ubicación dinámicamente
       const ubicKey = Object.keys(row).find(k => k.includes('Ubic')) || 'Ubicacion';
       
-      // Una fila es "cabecera" (actividad de ejecución) si trae cualquiera de los
-      // campos propios de la ejecución. Se incluye Causa Raíz/Tipo para blindar la
-      // atribución: una fila con Causa Raíz SIEMPRE es cabecera, nunca línea-hija.
       const isParent = row['Cant. Person'] !== null ||
                        row['Tiempo'] !== null ||
                        row[ubicKey] !== null ||
                        row['Causa Raiz'] !== null ||
                        row['Tipo'] !== null ||
                        row['Detalle'] !== null;
-                       
-      // Saltar vacíos
+                        
       if (row['INSUMO'] === null && row['CANTIDAD'] === null && !isParent) {
         continue;
       }
@@ -309,57 +298,45 @@ export function getExcelData(): TareaParsed[] {
       if (isParent) {
         const u = parseUbicacion(row[ubicKey]);
         const causa = cleanTextEncoding(row['Causa Raiz'] || 'Mantenimiento Programado').trim();
+        const sistemaCode = inferSubsystem(causa);
         
-        // Conversión de fechas
-        let fechaInicioStr = '';
+        let fechaStr = '2025-06-26';
         if (row['Fecha inic.'] instanceof Date) {
-          fechaInicioStr = row['Fecha inic.'].toISOString();
+          fechaStr = row['Fecha inic.'].toISOString().substring(0, 10);
         } else if (row['Fecha inic.']) {
-          fechaInicioStr = String(row['Fecha inic.']);
+          fechaStr = String(row['Fecha inic.']).substring(0, 10);
         }
         
-        let fechaFinStr: string | null = null;
-        if (row['Fecha Fin'] instanceof Date) {
-          fechaFinStr = row['Fecha Fin'].toISOString();
-        } else if (row['Fecha Fin']) {
-          fechaFinStr = String(row['Fecha Fin']);
-        }
-        
-        let periodoStr: string | null = null;
-        if (row['Periodo'] instanceof Date) {
-          periodoStr = row['Periodo'].toISOString().substring(0, 10);
-        } else if (row['Periodo']) {
-          periodoStr = String(row['Periodo']).substring(0, 10);
-        }
-
         const taskType: 'Incidente' | 'Requerimiento' = 
           row['Tipo'] && String(row['Tipo']).toLowerCase().trim() === 'incidente' ? 'Incidente' : 'Requerimiento';
           
-        currentTask = {
-          id: `tarea-${idx}`,
-          ticket: row['Ticket'] ? String(row['Ticket']) : null,
-          tipo: taskType,
+        const cantPersonas = row['Cant. Person'] !== null ? Number(row['Cant. Person']) : 1;
+        const duracionHoras = row['Tiempo'] !== null ? Number(row['Tiempo']) : 1.0;
+        
+        currentTicket = {
+          ticket_id: `ticket-${idx + 1}`,
+          codigo_registro: row['RESGISTROS'] ? String(row['RESGISTROS']) : (row['Ticket'] ? String(row['Ticket']) : `Registro ${idx + 1}`),
+          fecha: fechaStr,
+          tipo_registro: taskType,
+          tipo_trabajo: row['IM/SUP'] && String(row['IM/SUP']).toUpperCase().trim() === 'SUP' ? 'SUP' : 'IM',
+          cantidad_personal: cantPersonas,
+          duracion_horas: duracionHoras,
+          horas_hombre: cantPersonas * duracionHoras,
+          descripcion_corta: cleanTextEncoding(row['Detalle']),
+          trabajo_realizado: cleanTextEncoding(row['Trabajo Realizado']),
+          estado: 'Cerrado',
+          unidad_minera: row['U.M.'] ? String(row['U.M.']) : 'UM Corona',
+          mina: row['Mina'] ? String(row['Mina']) : 'Yauricocha',
           area: row['Area'] ? cleanTextEncoding(String(row['Area'])).trim() : 'Infraestructura',
-          origen: row['IM/SUP'] && String(row['IM/SUP']).toUpperCase().trim() === 'SUP' ? 'SUP' : 'IM',
           ubicacion: u,
           causa_raiz: causa,
-          cant_personas: row['Cant. Person'] !== null ? Number(row['Cant. Person']) : 0,
-          tiempo_horas: row['Tiempo'] !== null ? Number(row['Tiempo']) : 0,
-          horas_hombre:
-            (row['Cant. Person'] !== null ? Number(row['Cant. Person']) : 0) *
-            (row['Tiempo'] !== null ? Number(row['Tiempo']) : 0),
-          fecha_inicio: fechaInicioStr,
-          fecha_fin: fechaFinStr,
-          periodo: periodoStr,
-          detalle: cleanTextEncoding(row['Detalle']),
-          trabajo_realizado: cleanTextEncoding(row['Trabajo Realizado']),
+          sistema: sistemaCode,
           insumos: []
         };
         
-        tareas.push(currentTask);
+        tickets.push(currentTicket);
       }
       
-      // Agregar insumo si existe
       if (row['INSUMO'] !== null && String(row['INSUMO']).trim() !== '') {
         const insName = cleanTextEncoding(String(row['INSUMO'])).trim();
         const insNorm = INSUMO_CLEAN_MAP[insName] || insName;
@@ -381,23 +358,28 @@ export function getExcelData(): TareaParsed[] {
           unit = 'LT';
         }
         
-        if (currentTask) {
-          currentTask.insumos.push({
+        const insMeta = INSUMO_SKU_PRICE_MAP[insNorm] || { sku: 'GEN-SKU-001', price: 5.00, category: 'General' };
+        
+        if (currentTicket) {
+          currentTicket.insumos.push({
             name: insNorm,
+            sku: insMeta.sku,
             cantidad: qty,
             unidad: unit,
+            precio_unitario: insMeta.price,
+            costo_total: Math.round(qty * insMeta.price * 100) / 100,
             esLineaSeparada: !isParent
           });
         }
       }
     }
     
-    cachedData = {
-      tareas,
+    cachedTickets = {
+      tickets,
       lastUpdated: Date.now()
     };
     
-    return tareas;
+    return tickets;
   } catch (error) {
     console.error("Error al procesar el archivo Excel en Next.js:", error);
     return [];

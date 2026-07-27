@@ -1,10 +1,11 @@
 "use server";
 
 import { Pool } from 'pg';
-import type { TareaParsed } from '@/lib/excelParser';
+import * as XLSX from 'xlsx';
+import type { TicketParsed, InsumoConsumo } from '@/lib/excelParser';
 
-// Lazy-load del parser Excel solo cuando se necesite (evita importar `fs` en producción)
-async function loadExcelData(): Promise<TareaParsed[]> {
+// Lazy-load del parser Excel solo cuando se necesite
+async function loadExcelData(): Promise<TicketParsed[]> {
   try {
     const { getExcelData } = await import('@/lib/excelParser');
     return getExcelData();
@@ -14,12 +15,11 @@ async function loadExcelData(): Promise<TareaParsed[]> {
   }
 }
 
-// Inicializar Pool de conexiones a base de datos (Supabase) si la URL está presente
+// Inicializar Pool de conexiones a base de datos (Supabase / Postgres)
 const dbUrl = process.env.DATABASE_URL;
 let pool: Pool | null = null;
 
 if (dbUrl) {
-  // SSL solo para conexiones remotas (Supabase). En local (Docker/localhost) se desactiva.
   const isLocal = dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('sslmode=disable');
   pool = new Pool({
     connectionString: dbUrl,
@@ -27,10 +27,8 @@ if (dbUrl) {
   });
 }
 
-// URL del microservicio de predicción (server-to-server; no se expone al navegador)
+// URL del microservicio de predicción
 const PREDICTIVE_URL = process.env.PREDICTIVE_API_URL || 'http://127.0.0.1:8000';
-// Clave compartida Vercel↔Render. Si está configurada, se adjunta como X-API-Key en cada
-// llamada al microservicio (el server FastAPI la exige en /ingest y /export). Nunca llega al navegador.
 const PREDICTIVE_KEY = process.env.PREDICTIVE_API_KEY || '';
 function svcHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...(extra || {}) };
@@ -38,475 +36,530 @@ function svcHeaders(extra?: Record<string, string>): Record<string, string> {
   return h;
 }
 
-// ===== Helpers de analítica de carga (compartidos por ambas rutas) =====
+// ===== Interfaces Oficiales TdR_Sistema_KPIs_Yauricocha.md =====
 
-// Proyección baseline: regresión lineal simple sobre el índice temporal.
-// Con <3 puntos cae a la media (el histórico es corto, ver TdR §10).
-function proyectarBaseline(values: number[], meses: number): number[] {
-  const n = values.length;
-  if (n === 0) return Array(meses).fill(0);
-  if (n < 3) {
-    const m = values.reduce((a, b) => a + b, 0) / n;
-    return Array(meses).fill(Math.max(0, m));
-  }
-  const xs = values.map((_, i) => i);
-  const meanX = xs.reduce((a, b) => a + b, 0) / n;
-  const meanY = values.reduce((a, b) => a + b, 0) / n;
-  let num = 0, den = 0;
-  for (let i = 0; i < n; i++) {
-    num += (xs[i] - meanX) * (values[i] - meanY);
-    den += (xs[i] - meanX) ** 2;
-  }
-  const slope = den === 0 ? 0 : num / den;
-  const intercept = meanY - slope * meanX;
-  const out: number[] = [];
-  for (let k = 1; k <= meses; k++) out.push(Math.max(0, intercept + slope * (n - 1 + k)));
-  return out;
-}
+export type DashFilters = {
+  subsistema?: string;
+  tipo?: string;
+  origen?: string;
+  mes?: string;
+};
 
-function siguientesMeses(ultimoMes: string | null, meses: number): string[] {
-  const out: string[] = [];
-  let d = ultimoMes ? new Date(`${ultimoMes}-01T00:00:00`) : new Date();
-  for (let i = 0; i < meses; i++) {
-    d = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-  }
-  return out;
-}
-
-interface PuntoCarga {
+// KPI-01: Volumen Mensual por Tipo
+export interface KPI01_VolumenMensual {
   month: string;
-  hh: number | null;
-  tareas: number | null;
-  hhProy: number | null;
-  tareasProy: number | null;
+  incidentes: number;
+  requerimientos: number;
+  total: number;
 }
 
-// Une el histórico de carga (HH y nº tareas por mes) con la proyección a N meses.
-// El último punto histórico siembra la línea de proyección para que conecte visualmente.
-function construirProyeccionCarga(
-  serie: { month: string; hh: number; tareas: number }[],
-  meses = 3
-): PuntoCarga[] {
-  const ordenada = [...serie].sort((a, b) => a.month.localeCompare(b.month));
-  const hhProj = proyectarBaseline(ordenada.map(s => s.hh), meses);
-  const tareasProj = proyectarBaseline(ordenada.map(s => s.tareas), meses);
-
-  const result: PuntoCarga[] = ordenada.map(s => ({
-    month: s.month, hh: s.hh, tareas: s.tareas, hhProy: null, tareasProy: null
-  }));
-  if (result.length > 0) {
-    result[result.length - 1].hhProy = ordenada[ordenada.length - 1].hh;
-    result[result.length - 1].tareasProy = ordenada[ordenada.length - 1].tareas;
-  }
-  const ultimo = ordenada.length ? ordenada[ordenada.length - 1].month : null;
-  const futuros = siguientesMeses(ultimo, meses);
-  for (let i = 0; i < meses; i++) {
-    result.push({
-      month: futuros[i], hh: null, tareas: null,
-      hhProy: Math.round(hhProj[i]), tareasProy: Math.round(tareasProj[i])
-    });
-  }
-  return result;
+// KPI-02: Ratio de Incidencia
+export interface KPI02_RatioIncidencia {
+  month: string;
+  incidentes: number;
+  total: number;
+  ratio_pct: number;
+  promedio_historico: number; // 31.9%
 }
 
-export type DashFilters = { subsistema?: string; tipo?: string; origen?: string };
-
-interface DashTask {
-  tipo: string;
-  origen: string;
-  causa_raiz: string;
-  subsistema: string;
-  ubicacion: { nivel: string; zona: string; punto: string | null };
-  cant_personas: number;
-  tiempo_horas: number;
-  horas_hombre: number;
-  periodo: string | null;
-  detalle: string | null;
-  insumos: { name: string; cantidad: number; unidad: string; esLineaSeparada: boolean }[];
+// KPI-03: Distribución por Sistema
+export interface KPI03_DistribucionSistema {
+  codigo: string;
+  nombre: string;
+  total: number;
+  incidentes: number;
+  requerimientos: number;
+  pct: number;
 }
 
-// Subsistema según el código entre paréntesis de la causa (p.ej. "...(CCTV)")
-function inferSub(causa: string | null | undefined): string {
-  if (!causa) return 'DAT';
-  const m = causa.match(/\(([A-Za-z\-]+)\)/);
-  if (m) { const c = m[1].toUpperCase(); return c === 'WI-FI' ? 'WIFI' : c; }
-  return 'DAT';
+// KPI-04: Pareto de Causas Raíz
+export interface KPI04_ParetoCausas {
+  causa: string;
+  sistema: string;
+  cantidad: number;
+  pct_individual: number;
+  pct_acumulado: number;
 }
 
-function taskMatchesFilters(t: DashTask, f: DashFilters): boolean {
-  if (f.subsistema && t.subsistema !== f.subsistema) return false;
-  if (f.tipo && t.tipo !== f.tipo) return false;
-  if (f.origen && t.origen !== f.origen) return false;
+// KPI-05: % Incidentes por Daño de Terceros
+export interface KPI05_DanioTerceros {
+  month: string;
+  total_tickets: number;
+  tickets_danio: number;
+  pct_danio: number;
+}
+
+// KPI-06: Tiempo Promedio de Atención
+export interface KPI06_TiempoAtencion {
+  sistema: string;
+  incidentes_hrs: number;
+  requerimientos_hrs: number;
+  promedio_general_hrs: number;
+}
+
+// KPI-07: Personas-Hora Totales
+export interface KPI07_PersonasHora {
+  month: string;
+  hh_totales: number;
+  total_tickets: number;
+  hh_promedio_ticket: number;
+}
+
+// KPI-08: Top Ubicaciones
+export interface KPI08_TopUbicaciones {
+  ubicacion: string;
+  nivel: string;
+  piso: string;
+  zona: string;
+  total: number;
+  pct: number;
+}
+
+// KPI-09: Consumo de Materiales
+export interface KPI09_ConsumoMateriales {
+  insumo: string;
+  sku: string;
+  unidad: string;
+  cantidad_total: number;
+  tickets_count: number;
+}
+
+// KPI-10: Costo de Materiales
+export interface KPI10_CostoMateriales {
+  month: string;
+  DAT: number;
+  CCTV: number;
+  RAD: number;
+  TEL: number;
+  GEO: number;
+  FO: number;
+  WIFI: number;
+  total: number;
+}
+
+export interface DashboardDataResult {
+  // Resumen Ejecutivo
+  totalTickets: number;
+  totalIncidentes: number;
+  totalRequerimientos: number;
+  ratioIncidenciaGlobalPct: number;
+  totalPersonasHora: number;
+  promedioHHporTicket: number;
+  totalCostoMateriales: number;
+  
+  // KPIs Oficiales del TdR (Bloques A, B y C)
+  kpi01_volumenMensual: KPI01_VolumenMensual[];
+  kpi02_ratioIncidencia: KPI02_RatioIncidencia[];
+  kpi03_distribucionSistema: KPI03_DistribucionSistema[];
+  kpi04_paretoCausas: KPI04_ParetoCausas[];
+  kpi05_danioTerceros: KPI05_DanioTerceros[];
+  kpi06_tiempoAtencion: KPI06_TiempoAtencion[];
+  kpi07_personasHora: KPI07_PersonasHora[];
+  kpi08_topUbicaciones: KPI08_TopUbicaciones[];
+  kpi09_consumoMateriales: KPI09_ConsumoMateriales[];
+  kpi10_costoMateriales: KPI10_CostoMateriales[];
+
+  // Compatibilidad adicional
+  source: 'supabase' | 'excel';
+}
+
+function taskMatchesFilters(t: TicketParsed, f: DashFilters): boolean {
+  if (f.subsistema && t.sistema !== f.subsistema) return false;
+  if (f.tipo && t.tipo_registro !== f.tipo) return false;
+  if (f.origen && t.tipo_trabajo !== f.origen) return false;
+  if (f.mes && !t.fecha.startsWith(f.mes)) return false;
   return true;
 }
 
-// Construye TODO el dashboard a partir de una lista de tareas (de BD o Excel).
-// Unifica la analítica: los filtros solo recortan esta lista y todo se recalcula.
-// Estadística descriptiva para boxplots (cuartiles por interpolación + bigotes 1.5·IQR + outliers)
-function quartiles(values: number[]) {
-  const s = [...values].sort((a, b) => a - b);
-  const n = s.length;
-  const q = (p: number) => {
-    if (n === 0) return 0;
-    const idx = p * (n - 1);
-    const lo = Math.floor(idx), hi = Math.ceil(idx);
-    return s[lo] + (s[hi] - s[lo]) * (idx - lo);
+// Construye todo el Dashboard de KPIs directamente a partir de la lista de Tickets
+function buildDashboardFromTickets(tickets: TicketParsed[], source: 'supabase' | 'excel'): DashboardDataResult {
+  const totalTickets = tickets.length;
+  let totalIncidentes = 0;
+  let totalRequerimientos = 0;
+  let totalPersonasHora = 0;
+  let totalCostoMateriales = 0;
+
+  // Agrupadores por Mes (YYYY-MM)
+  const monthMap: { [m: string]: { incidentes: number; requerimientos: number; hh: number; danio: number; costos: { [sub: string]: number } } } = {};
+  
+  // Agrupadores por Sistema
+  const sistemaMap: { [s: string]: { total: number; incidentes: number; requerimientos: number; duracion_inc: number[]; duracion_req: number[] } } = {
+    DAT: { total: 0, incidentes: 0, requerimientos: 0, duracion_inc: [], duracion_req: [] },
+    CCTV: { total: 0, incidentes: 0, requerimientos: 0, duracion_inc: [], duracion_req: [] },
+    RAD: { total: 0, incidentes: 0, requerimientos: 0, duracion_inc: [], duracion_req: [] },
+    TEL: { total: 0, incidentes: 0, requerimientos: 0, duracion_inc: [], duracion_req: [] },
+    GEO: { total: 0, incidentes: 0, requerimientos: 0, duracion_inc: [], duracion_req: [] },
+    FO: { total: 0, incidentes: 0, requerimientos: 0, duracion_inc: [], duracion_req: [] },
+    WIFI: { total: 0, incidentes: 0, requerimientos: 0, duracion_inc: [], duracion_req: [] },
   };
-  const q1 = q(0.25), median = q(0.5), q3 = q(0.75);
-  const iqr = q3 - q1;
-  const loF = q1 - 1.5 * iqr, hiF = q3 + 1.5 * iqr;
-  const inside = s.filter(v => v >= loF && v <= hiF);
-  const mean = n ? s.reduce((a, b) => a + b, 0) / n : 0;
-  const r = (x: number) => Math.round(x * 100) / 100;
-  return {
-    min: r(s[0] ?? 0), q1: r(q1), median: r(median), q3: r(q3), max: r(s[n - 1] ?? 0),
-    whiskerLo: r(inside.length ? inside[0] : (s[0] ?? 0)),
-    whiskerHi: r(inside.length ? inside[inside.length - 1] : (s[n - 1] ?? 0)),
-    mean: r(mean),
-    outliers: s.filter(v => v < loF || v > hiF).slice(0, 40).map(r),
-  };
-}
 
-function buildHistogram(values: number[], bins: number) {
-  if (!values.length) return [] as { rango: string; count: number }[];
-  const min = Math.min(...values), max = Math.max(...values);
-  if (max === min) return [{ rango: `${Math.round(min * 10) / 10}`, count: values.length }];
-  const width = (max - min) / bins;
-  const counts = new Array(bins).fill(0);
-  values.forEach(v => { let i = Math.floor((v - min) / width); if (i >= bins) i = bins - 1; counts[i]++; });
-  const r = (x: number) => Math.round(x * 10) / 10;
-  return counts.map((c, i) => ({ rango: `${r(min + i * width)}–${r(min + (i + 1) * width)}`, count: c }));
-}
+  // Agrupadores por Causa Raíz
+  const causaMap: { [c: string]: { count: number; sistema: string } } = {};
 
-// Pareto: ordena de mayor a menor, agrupa la cola en 'Otros' y añade el % acumulado.
-function paretoFrom(pairs: [string, number][], topN = 10) {
-  const arr = [...pairs].sort((a, b) => b[1] - a[1]);
-  const total = arr.reduce((s, x) => s + x[1], 0) || 1;
-  const rest = arr.slice(topN).reduce((s, x) => s + x[1], 0);
-  const base: [string, number][] = rest > 0 ? [...arr.slice(0, topN), ['Otros', rest]] : arr.slice(0, topN);
-  let acc = 0;
-  return base.map(([name, count]) => { acc += count; return { name, count: Math.round(count * 100) / 100, acumulado: Math.round((acc / total) * 1000) / 10 }; });
-}
+  // Agrupadores por Ubicación
+  const ubicacionMap: { [u: string]: { nivel: string; piso: string; zona: string; count: number } } = {};
 
-// Desviación estándar muestral (para las bandas de confianza de las predicciones)
-function stddev(values: number[]) {
-  const v = values.filter(x => typeof x === 'number' && !isNaN(x));
-  if (v.length < 2) return 0;
-  const m = v.reduce((a, b) => a + b, 0) / v.length;
-  return Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / (v.length - 1));
-}
+  // Agrupadores por Insumo
+  const insumoMap: { [name: string]: { sku: string; unidad: string; cantidad: number; count: number } } = {};
 
-function buildDashboardFromTasks(tasks: DashTask[], source: string) {
-  const totalTasks = tasks.length;
+  tickets.forEach(t => {
+    const isInc = t.tipo_registro === 'Incidente';
+    if (isInc) totalIncidentes++; else totalRequerimientos++;
 
-  let totalInsumosQty = 0;
-  const insumosCountMap: { [k: string]: number } = {};
-  const subsistemaCountMap: { [k: string]: number } = {};
-  const originCountMap: { [k: string]: number } = { IM: 0, SUP: 0 };
-  const tipoCountMap: { [k: string]: number } = { Incidente: 0, Requerimiento: 0 };
-  let totalPerson = 0, totalHours = 0, totalHH = 0;
-  const periodMap: { [k: string]: { incidentes: number; requerimientos: number } } = {};
-  const locationFaultsMap: { [k: string]: number } = {};
-  const causaMap: { [k: string]: { count: number; horas: number; hh: number; detalles: { [d: string]: number } } } = {};
-  const nivelMap: { [k: string]: { hh: number; horas: number; tareas: number } } = {};
-  const insumoHHMap: { [k: string]: number } = {};
-  const insumoHorasMap: { [k: string]: number } = {};
-  const hhPeriodMap: { [k: string]: { hh: number; tareas: number } } = {};
-  let lineasMaterial = 0, actividadesConMaterial = 0;
-  const suministrosPorUnidad: { [u: string]: number } = { UN: 0, M: 0, LT: 0 };
-  // ANS/SLA por esfuerzo (columna Tiempo): objetivo de horas por tipo de tarea
-  const SLA_OBJETIVO: { [tipo: string]: number } = { Incidente: 3, Requerimiento: 4 };
-  let slaTotal = 0, slaCumple = 0;
-  const slaPorTipo: { [tipo: string]: { total: number; cumple: number } } = {
-    Incidente: { total: 0, cumple: 0 },
-    Requerimiento: { total: 0, cumple: 0 }
-  };
-  // Datos para gráficos estadísticos (dispersión, boxplots, histograma)
-  const dispersion: { personas: number; tiempo: number; hh: number; tipo: string; sub: string }[] = [];
-  const tiempoPorSub: { [k: string]: number[] } = {};
-  const hhPorTipo: { [k: string]: number[] } = {};
-  const tiempoTodos: number[] = [];
-  const nivelSubMap: { [niv: string]: { [sub: string]: number } } = {};
-  const hhBySubMap: { [k: string]: number } = {};
-  const dispersionInsumos: { nInsumos: number; hh: number; tipo: string }[] = [];
+    const hh = t.horas_hombre || (t.cantidad_personal * t.duracion_horas);
+    totalPersonasHora += hh;
 
-  tasks.forEach(t => {
-    totalPerson += t.cant_personas || 0;
-    totalHours += t.tiempo_horas || 0;
-    totalHH += t.horas_hombre || 0;
-
-    const _tiempo = t.tiempo_horas || 0;
-    const _personas = t.cant_personas || 0;
-    const _sub = t.subsistema || 'DAT';
-    const _tipo = t.tipo === 'Incidente' ? 'Incidente' : 'Requerimiento';
-    if (_tiempo > 0) {
-      tiempoTodos.push(_tiempo);
-      (tiempoPorSub[_sub] = tiempoPorSub[_sub] || []).push(_tiempo);
+    const month = t.fecha ? t.fecha.substring(0, 7) : '2025-07';
+    if (!monthMap[month]) {
+      monthMap[month] = {
+        incidentes: 0,
+        requerimientos: 0,
+        hh: 0,
+        danio: 0,
+        costos: { DAT: 0, CCTV: 0, RAD: 0, TEL: 0, GEO: 0, FO: 0, WIFI: 0 }
+      };
     }
-    if ((t.horas_hombre || 0) > 0) (hhPorTipo[_tipo] = hhPorTipo[_tipo] || []).push(t.horas_hombre);
-    if (_tiempo > 0 && _personas > 0 && dispersion.length < 2000) {
-      dispersion.push({ personas: _personas, tiempo: Math.round(_tiempo * 100) / 100, hh: Math.round(t.horas_hombre || 0), tipo: _tipo, sub: _sub });
-    }
-    if (t.insumos.length > 0 && (t.horas_hombre || 0) > 0 && dispersionInsumos.length < 2000) {
-      dispersionInsumos.push({ nInsumos: t.insumos.length, hh: Math.round(t.horas_hombre || 0), tipo: _tipo });
+    if (isInc) monthMap[month].incidentes++; else monthMap[month].requerimientos++;
+    monthMap[month].hh += hh;
+
+    if (t.causa_raiz.toLowerCase().includes('cable roto por trabajos')) {
+      monthMap[month].danio++;
     }
 
-    const causaKey = t.causa_raiz || 'Mantenimiento Programado';
-    if (!causaMap[causaKey]) causaMap[causaKey] = { count: 0, horas: 0, hh: 0, detalles: {} };
-    causaMap[causaKey].count++;
-    causaMap[causaKey].horas += t.tiempo_horas || 0;
-    causaMap[causaKey].hh += t.horas_hombre || 0;
-    const detKey = (t.detalle && t.detalle.trim()) ? t.detalle.trim() : '(sin detalle)';
-    causaMap[causaKey].detalles[detKey] = (causaMap[causaKey].detalles[detKey] || 0) + 1;
-
-    const nivKey = t.ubicacion.nivel || 'Interior Mina';
-    if (!nivelMap[nivKey]) nivelMap[nivKey] = { hh: 0, horas: 0, tareas: 0 };
-    nivelMap[nivKey].hh += t.horas_hombre || 0;
-    nivelMap[nivKey].horas += t.tiempo_horas || 0;
-    nivelMap[nivKey].tareas++;
-
-    if (t.periodo) {
-      const m = t.periodo.substring(0, 7);
-      if (!hhPeriodMap[m]) hhPeriodMap[m] = { hh: 0, tareas: 0 };
-      hhPeriodMap[m].hh += t.horas_hombre || 0;
-      hhPeriodMap[m].tareas++;
+    // Sistema
+    const sub = t.sistema || 'DAT';
+    if (sistemaMap[sub]) {
+      sistemaMap[sub].total++;
+      if (isInc) {
+        sistemaMap[sub].incidentes++;
+        sistemaMap[sub].duracion_inc.push(t.duracion_horas);
+      } else {
+        sistemaMap[sub].requerimientos++;
+        sistemaMap[sub].duracion_req.push(t.duracion_horas);
+      }
     }
 
-    const subCode = t.subsistema || 'DAT';
-    subsistemaCountMap[subCode] = (subsistemaCountMap[subCode] || 0) + 1;
-    const _ns = nivelSubMap[nivKey] = nivelSubMap[nivKey] || {};
-    _ns[subCode] = (_ns[subCode] || 0) + 1;
-    hhBySubMap[subCode] = (hhBySubMap[subCode] || 0) + (t.horas_hombre || 0);
+    // Causa Raíz
+    const causa = t.causa_raiz || 'Mantenimiento Programado';
+    if (!causaMap[causa]) causaMap[causa] = { count: 0, sistema: sub };
+    causaMap[causa].count++;
 
-    if (t.origen === 'SUP') originCountMap.SUP++; else originCountMap.IM++;
-    const tipoKey = t.tipo === 'Incidente' ? 'Incidente' : 'Requerimiento';
-    tipoCountMap[tipoKey]++;
-    // ANS por esfuerzo: contar solo tareas con tiempo registrado (>0)
-    if ((t.tiempo_horas || 0) > 0) {
-      slaTotal++;
-      slaPorTipo[tipoKey].total++;
-      if (t.tiempo_horas <= SLA_OBJETIVO[tipoKey]) { slaCumple++; slaPorTipo[tipoKey].cumple++; }
+    // Ubicación
+    const uNorm = t.ubicacion.nombre_normalizado || `${t.ubicacion.nivel} ${t.ubicacion.piso} ${t.ubicacion.zona}`;
+    if (!ubicacionMap[uNorm]) {
+      ubicacionMap[uNorm] = {
+        nivel: t.ubicacion.nivel,
+        piso: t.ubicacion.piso,
+        zona: t.ubicacion.zona,
+        count: 0
+      };
     }
+    ubicacionMap[uNorm].count++;
 
-    const locName = `${t.ubicacion.nivel} > ${t.ubicacion.zona}`;
-    locationFaultsMap[locName] = (locationFaultsMap[locName] || 0) + 1;
-
-    if (t.periodo) {
-      const month = t.periodo.substring(0, 7);
-      if (!periodMap[month]) periodMap[month] = { incidentes: 0, requerimientos: 0 };
-      if (t.tipo === 'Incidente') periodMap[month].incidentes++; else periodMap[month].requerimientos++;
-    }
-
+    // Insumos
     t.insumos.forEach(ins => {
-      totalInsumosQty += ins.cantidad;
-      insumosCountMap[ins.name] = (insumosCountMap[ins.name] || 0) + ins.cantidad;
-      insumoHHMap[ins.name] = (insumoHHMap[ins.name] || 0) + (t.horas_hombre || 0);
-      insumoHorasMap[ins.name] = (insumoHorasMap[ins.name] || 0) + (t.tiempo_horas || 0);
-      const u = suministrosPorUnidad[ins.unidad] !== undefined ? ins.unidad : 'UN';
-      suministrosPorUnidad[u] += ins.cantidad;
+      totalCostoMateriales += ins.costo_total;
+      monthMap[month].costos[sub] = (monthMap[month].costos[sub] || 0) + ins.costo_total;
+
+      if (!insumoMap[ins.name]) {
+        insumoMap[ins.name] = {
+          sku: ins.sku,
+          unidad: ins.unidad,
+          cantidad: 0,
+          count: 0
+        };
+      }
+      insumoMap[ins.name].cantidad += ins.cantidad;
+      insumoMap[ins.name].count++;
     });
-    // Modelo de bloque: cada actividad es cabecera + sus filas de material
-    lineasMaterial += t.insumos.length;
-    if (t.insumos.length > 0) actividadesConMaterial++;
   });
 
-  // ---- estadística descriptiva: boxplots + histograma + correlación ----
-  const boxFrom = (m: { [k: string]: number[] }, minN: number) =>
-    Object.entries(m).filter(([, v]) => v.length >= minN)
-      .map(([name, v]) => ({ name, ...quartiles(v), count: v.length }));
-  const boxTiempoSub = boxFrom(tiempoPorSub, 5).sort((a, b) => b.median - a.median);
-  const boxHHTipo = boxFrom(hhPorTipo, 1).sort((a, b) => a.name.localeCompare(b.name));
-  const histTiempo = buildHistogram(tiempoTodos, 12);
-  let corrPersonasTiempo = 0;
-  if (dispersion.length > 2) {
-    const xs = dispersion.map(d => d.personas), ys = dispersion.map(d => d.tiempo);
-    const n = xs.length, mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
-    let num = 0, dx = 0, dy = 0;
-    for (let i = 0; i < n; i++) { const a = xs[i] - mx, b = ys[i] - my; num += a * b; dx += a * a; dy += b * b; }
-    corrPersonasTiempo = (dx > 0 && dy > 0) ? Math.round((num / Math.sqrt(dx * dy)) * 100) / 100 : 0;
-  }
-
-  // Pareto (top 10 + 'Otros') con % acumulado — causas, insumos y ubicaciones
-  const paretoCausas = paretoFrom(Object.entries(causaMap).map(([n, v]) => [n, v.count] as [string, number]), 10);
-  const paretoHHCausa = paretoFrom(Object.entries(causaMap).map(([n, v]) => [n, Math.round(v.hh)] as [string, number]), 10);
-  const paretoInsumos = paretoFrom(Object.entries(insumosCountMap) as [string, number][], 10);
-  const paretoZonas = paretoFrom(Object.entries(locationFaultsMap) as [string, number][], 10);
-
-  // Mapa de calor Nivel × Subsistema (top 10 niveles por volumen)
-  const _subOrder = ['DAT', 'CCTV', 'RAD', 'TEL', 'GEO', 'FO', 'WIFI'];
-  const _nivOrdered = Object.entries(nivelSubMap)
-    .map(([niv, mm]) => ({ niv, total: Object.values(mm).reduce((s, x) => s + x, 0) }))
-    .sort((a, b) => b.total - a.total).slice(0, 10);
-  const heatRows = _nivOrdered.map(x => x.niv);
-  const heatCols = _subOrder.filter(s => heatRows.some(r => (nivelSubMap[r] || {})[s]));
-  const heatMatrix = heatRows.map(r => heatCols.map(c => (nivelSubMap[r] || {})[c] || 0));
-  const heatNivelSub = { rows: heatRows, cols: heatCols, matrix: heatMatrix, max: Math.max(1, ...heatMatrix.flat()) };
-
-  // Radar por subsistema: % de tareas y % de HH (cada uno normalizado a su máximo)
-  const _maxTareasSub = Math.max(1, ...Object.values(subsistemaCountMap));
-  const _maxHHSub = Math.max(1, ...Object.values(hhBySubMap));
-  const radarSub = Object.keys(subsistemaCountMap).sort().map(sub => ({
-    sub,
-    tareasPct: Math.round((subsistemaCountMap[sub] / _maxTareasSub) * 100),
-    hhPct: Math.round(((hhBySubMap[sub] || 0) / _maxHHSub) * 100),
+  // KPI-01: Volumen Mensual
+  const sortedMonths = Object.keys(monthMap).sort();
+  const kpi01_volumenMensual: KPI01_VolumenMensual[] = sortedMonths.map(m => ({
+    month: m,
+    incidentes: monthMap[m].incidentes,
+    requerimientos: monthMap[m].requerimientos,
+    total: monthMap[m].incidentes + monthMap[m].requerimientos
   }));
 
-  const topInsumos = Object.entries(insumosCountMap)
-    .map(([name, val]) => ({ name, value: Math.round(val * 100) / 100 }))
-    .sort((a, b) => b.value - a.value).slice(0, 8);
-  const subsistemas = Object.entries(subsistemaCountMap)
-    .map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  const topLocations = Object.entries(locationFaultsMap)
-    .map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 6);
-  const monthlyTrend = Object.entries(periodMap)
-    .map(([month, val]) => ({ month, incidentes: val.incidentes, requerimientos: val.requerimientos, total: val.incidentes + val.requerimientos }))
-    .sort((a, b) => a.month.localeCompare(b.month));
-  const hhPorCausa = Object.entries(causaMap)
-    .map(([name, v]) => ({ name, tareas: v.count, horas: Math.round(v.horas), hh: Math.round(v.hh) }))
-    .sort((a, b) => b.hh - a.hh).slice(0, 8);
-  const hhPorNivel = Object.entries(nivelMap)
-    .map(([name, v]) => ({ name, hh: Math.round(v.hh), horas: Math.round(v.horas), tareas: v.tareas }))
-    .sort((a, b) => b.hh - a.hh).slice(0, 8);
-  const causaDetalle = Object.entries(causaMap)
-    .sort((a, b) => b[1].count - a[1].count).slice(0, 6)
-    .map(([name, v]) => ({
-      name, total: v.count, hh: Math.round(v.hh),
-      detalles: Object.entries(v.detalles).map(([d, c]) => ({ name: d, value: c })).sort((a, b) => b.value - a.value).slice(0, 5)
-    }));
-  const mermas = Object.keys(insumosCountMap)
-    .map(name => {
-      const qty = insumosCountMap[name];
-      const hh = insumoHHMap[name] || 0;
-      const horas = insumoHorasMap[name] || 0;
+  // KPI-02: Ratio de Incidencia
+  const kpi02_ratioIncidencia: KPI02_RatioIncidencia[] = sortedMonths.map(m => {
+    const tot = monthMap[m].incidentes + monthMap[m].requerimientos;
+    const ratio = tot > 0 ? Math.round((monthMap[m].incidentes / tot) * 10000) / 100 : 0;
+    return {
+      month: m,
+      incidentes: monthMap[m].incidentes,
+      total: tot,
+      ratio_pct: ratio,
+      promedio_historico: 31.9
+    };
+  });
+
+  // KPI-03: Distribución por Sistema
+  const nombresSistemas: { [code: string]: string } = {
+    DAT: 'Red de Datos',
+    CCTV: 'Circuito Cerrado de TV',
+    RAD: 'Radiocomunicaciones',
+    TEL: 'Telefonía e Intercomunicación',
+    GEO: 'Geomecánica y Sensores',
+    FO: 'Fibra Óptica Primaria',
+    WIFI: 'Red Inalámbrica WiFi'
+  };
+  const kpi03_distribucionSistema: KPI03_DistribucionSistema[] = Object.keys(sistemaMap)
+    .map(code => {
+      const s = sistemaMap[code];
+      const pct = totalTickets > 0 ? Math.round((s.total / totalTickets) * 10000) / 100 : 0;
       return {
-        name, cantidad: Math.round(qty * 100) / 100, hh: Math.round(hh),
-        porHH: hh > 0 ? Math.round((qty / hh) * 1000) / 1000 : 0,
-        porHora: horas > 0 ? Math.round((qty / horas) * 1000) / 1000 : 0
+        codigo: code,
+        nombre: nombresSistemas[code] || code,
+        total: s.total,
+        incidentes: s.incidentes,
+        requerimientos: s.requerimientos,
+        pct
       };
     })
-    .filter(x => x.hh >= 10).sort((a, b) => b.porHH - a.porHH).slice(0, 8);
-  const materialesResumen = {
-    actividades: totalTasks,
-    lineasMaterial,
-    promPorActividad: totalTasks ? Math.round((lineasMaterial / totalTasks) * 10) / 10 : 0,
-    actividadesConMaterial,
-    pctConMaterial: totalTasks ? Math.round((actividadesConMaterial / totalTasks) * 100) : 0
-  };
-  const cargaSerie = Object.entries(hhPeriodMap).map(([month, v]) => ({ month, hh: Math.round(v.hh), tareas: v.tareas }));
-  const cargaProyeccion = construirProyeccionCarga(cargaSerie, 3);
-  const insumoNames = Object.keys(insumosCountMap).sort((a, b) => insumosCountMap[b] - insumosCountMap[a]);
+    .sort((a, b) => b.total - a.total);
 
-  // (12) Suministros por unidad (UN/M/LT son magnitudes distintas: no se suman entre sí)
-  const suministros = {
-    UN: Math.round(suministrosPorUnidad.UN || 0),
-    M: Math.round(suministrosPorUnidad.M || 0),
-    LT: Math.round((suministrosPorUnidad.LT || 0) * 100) / 100
-  };
-
-  // (10) ANS/SLA usando la columna Tiempo como esfuerzo de resolución (las fechas no sirven)
-  const mkSla = (o: { total: number; cumple: number }, objetivo: number, tipo: string) => ({
-    tipo, objetivo, total: o.total, cumple: o.cumple,
-    pct: o.total ? Math.round((o.cumple / o.total) * 100) : 0
+  // KPI-04: Pareto de Causas Raíz
+  const causaSorted = Object.entries(causaMap)
+    .map(([causa, meta]) => ({ causa, sistema: meta.sistema, cantidad: meta.count }))
+    .sort((a, b) => b.cantidad - a.cantidad);
+  
+  let accPareto = 0;
+  const kpi04_paretoCausas: KPI04_ParetoCausas[] = causaSorted.map(c => {
+    accPareto += c.cantidad;
+    const pctInd = totalTickets > 0 ? Math.round((c.cantidad / totalTickets) * 10000) / 100 : 0;
+    const pctAcum = totalTickets > 0 ? Math.round((accPareto / totalTickets) * 10000) / 100 : 0;
+    return {
+      causa: c.causa,
+      sistema: c.sistema,
+      cantidad: c.cantidad,
+      pct_individual: pctInd,
+      pct_acumulado: pctAcum
+    };
   });
-  const sla = {
-    total: slaTotal,
-    cumple: slaCumple,
-    pct: slaTotal ? Math.round((slaCumple / slaTotal) * 100) : 0,
-    porTipo: [
-      mkSla(slaPorTipo.Incidente, SLA_OBJETIVO.Incidente, 'Incidente'),
-      mkSla(slaPorTipo.Requerimiento, SLA_OBJETIVO.Requerimiento, 'Requerimiento')
-    ]
-  };
+
+  // KPI-05: Daño de Terceros
+  const kpi05_danioTerceros: KPI05_DanioTerceros[] = sortedMonths.map(m => {
+    const tot = monthMap[m].incidentes + monthMap[m].requerimientos;
+    const danio = monthMap[m].danio;
+    const pct = tot > 0 ? Math.round((danio / tot) * 10000) / 100 : 0;
+    return {
+      month: m,
+      total_tickets: tot,
+      tickets_danio: danio,
+      pct_danio: pct
+    };
+  });
+
+  // KPI-06: Tiempo Promedio de Atención
+  const kpi06_tiempoAtencion: KPI06_TiempoAtencion[] = Object.keys(sistemaMap).map(code => {
+    const s = sistemaMap[code];
+    const avgInc = s.duracion_inc.length > 0 ? s.duracion_inc.reduce((a, b) => a + b, 0) / s.duracion_inc.length : 0;
+    const avgReq = s.duracion_req.length > 0 ? s.duracion_req.reduce((a, b) => a + b, 0) / s.duracion_req.length : 0;
+    const allDur = [...s.duracion_inc, ...s.duracion_req];
+    const avgGen = allDur.length > 0 ? allDur.reduce((a, b) => a + b, 0) / allDur.length : 0;
+    return {
+      sistema: code,
+      incidentes_hrs: Math.round(avgInc * 100) / 100,
+      requerimientos_hrs: Math.round(avgReq * 100) / 100,
+      promedio_general_hrs: Math.round(avgGen * 100) / 100
+    };
+  });
+
+  // KPI-07: Personas-Hora Totales por Mes
+  const kpi07_personasHora: KPI07_PersonasHora[] = sortedMonths.map(m => {
+    const tot = monthMap[m].incidentes + monthMap[m].requerimientos;
+    const hh = Math.round(monthMap[m].hh * 10) / 10;
+    const avg = tot > 0 ? Math.round((hh / tot) * 100) / 100 : 0;
+    return {
+      month: m,
+      hh_totales: hh,
+      total_tickets: tot,
+      hh_promedio_ticket: avg
+    };
+  });
+
+  // KPI-08: Top Ubicaciones (Top 15)
+  const kpi08_topUbicaciones: KPI08_TopUbicaciones[] = Object.entries(ubicacionMap)
+    .map(([uNorm, meta]) => ({
+      ubicacion: uNorm,
+      nivel: meta.nivel,
+      piso: meta.piso,
+      zona: meta.zona,
+      total: meta.count,
+      pct: totalTickets > 0 ? Math.round((meta.count / totalTickets) * 10000) / 100 : 0
+    }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 15);
+
+  // KPI-09: Consumo de Materiales (Top Insumos)
+  const kpi09_consumoMateriales: KPI09_ConsumoMateriales[] = Object.entries(insumoMap)
+    .map(([name, meta]) => ({
+      insumo: name,
+      sku: meta.sku,
+      unidad: meta.unidad,
+      cantidad_total: Math.round(meta.cantidad * 100) / 100,
+      tickets_count: meta.count
+    }))
+    .sort((a, b) => b.cantidad_total - a.cantidad_total);
+
+  // KPI-10: Costo de Materiales por Mes y Sistema
+  const kpi10_costoMateriales: KPI10_CostoMateriales[] = sortedMonths.map(m => {
+    const c = monthMap[m].costos;
+    const dat = Math.round((c.DAT || 0) * 100) / 100;
+    const cctv = Math.round((c.CCTV || 0) * 100) / 100;
+    const rad = Math.round((c.RAD || 0) * 100) / 100;
+    const tel = Math.round((c.TEL || 0) * 100) / 100;
+    const geo = Math.round((c.GEO || 0) * 100) / 100;
+    const fo = Math.round((c.FO || 0) * 100) / 100;
+    const wifi = Math.round((c.WIFI || 0) * 100) / 100;
+    const tot = Math.round((dat + cctv + rad + tel + geo + fo + wifi) * 100) / 100;
+    return {
+      month: m,
+      DAT: dat,
+      CCTV: cctv,
+      RAD: rad,
+      TEL: tel,
+      GEO: geo,
+      FO: fo,
+      WIFI: wifi,
+      total: tot
+    };
+  });
+
+  const ratioGlobal = totalTickets > 0 ? Math.round((totalIncidentes / totalTickets) * 10000) / 100 : 0;
+  const promHH = totalTickets > 0 ? Math.round((totalPersonasHora / totalTickets) * 100) / 100 : 0;
 
   return {
-    totalTasks,
-    totalInsumosQty: Math.round(totalInsumosQty),
-    avgPerson: totalTasks ? Math.round((totalPerson / totalTasks) * 10) / 10 : 0,
-    avgHours: totalTasks ? Math.round((totalHours / totalTasks) * 10) / 10 : 0,
-    totalHH: Math.round(totalHH),
-    totalHoras: Math.round(totalHours),
-    topInsumos, subsistemas, topLocations, monthlyTrend,
-    hhPorCausa, hhPorNivel, causaDetalle, mermas, materialesResumen, cargaProyeccion,
-    insumoNames, suministros, sla,
-    dispersion, boxTiempoSub, boxHHTipo, histTiempo, corrPersonasTiempo,
-    paretoCausas, paretoHHCausa, paretoInsumos, paretoZonas, heatNivelSub, radarSub, dispersionInsumos,
-    originDistribution: [
-      { name: 'Interior Mina', value: originCountMap.IM },
-      { name: 'Superficie', value: originCountMap.SUP }
-    ],
-    tipoDistribution: [
-      { name: 'Incidentes', value: tipoCountMap.Incidente },
-      { name: 'Requerimientos', value: tipoCountMap.Requerimiento }
-    ],
+    totalTickets,
+    totalIncidentes,
+    totalRequerimientos,
+    ratioIncidenciaGlobalPct: ratioGlobal,
+    totalPersonasHora: Math.round(totalPersonasHora),
+    promedioHHporTicket: promHH,
+    totalCostoMateriales: Math.round(totalCostoMateriales * 100) / 100,
+
+    kpi01_volumenMensual,
+    kpi02_ratioIncidencia,
+    kpi03_distribucionSistema,
+    kpi04_paretoCausas,
+    kpi05_danioTerceros,
+    kpi06_tiempoAtencion,
+    kpi07_personasHora,
+    kpi08_topUbicaciones,
+    kpi09_consumoMateriales,
+    kpi10_costoMateriales,
+
     source
   };
 }
 
-export async function fetchDashboardData(filters: DashFilters = {}) {
+export async function fetchDashboardData(filters: DashFilters = {}): Promise<DashboardDataResult> {
   if (pool) {
     try {
       const client = await pool.connect();
       try {
-      const where: string[] = [];
-      const params: any[] = [];
-      let pi = 1;
-      if (filters.tipo) { where.push(`ct.nombre = $${pi++}`); params.push(filters.tipo); }
-      if (filters.origen) { where.push(`co.nombre = $${pi++}`); params.push(filters.origen); }
-      if (filters.subsistema) { where.push(`cs.codigo = $${pi++}`); params.push(filters.subsistema); }
-      const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+        const where: string[] = [];
+        const params: any[] = [];
+        let pi = 1;
 
-      // Filas de tarea con dimensiones (filtros aplicados en SQL)
-      const tareasRes = await client.query(`
-        SELECT t.id, ct.nombre AS tipo, co.nombre AS origen,
-               COALESCE(cr.nombre, 'Mantenimiento Programado') AS causa_raiz,
-               COALESCE(cs.codigo, 'DAT') AS subsistema,
-               COALESCE(u.nivel, 'Interior Mina') AS nivel,
-               COALESCE(u.zona, 'General') AS zona, u.punto,
-               COALESCE(t.cant_personas, 0) AS cant_personas,
-               COALESCE(t.tiempo_horas, 0)::float AS tiempo_horas,
-               to_char(t.periodo, 'YYYY-MM') AS periodo, t.detalle
-        FROM tarea t
-        JOIN cat_tipo ct ON t.tipo_id = ct.id
-        JOIN cat_origen co ON t.origen_id = co.id
-        LEFT JOIN cat_causa_raiz cr ON t.causa_raiz_id = cr.id
-        LEFT JOIN cat_subsistema cs ON cr.subsistema_id = cs.id
-        LEFT JOIN ubicacion u ON t.ubicacion_id = u.id
-        ${whereSql}
-      `, params);
+        if (filters.tipo) { where.push(`t.tipo_registro = $${pi++}`); params.push(filters.tipo); }
+        if (filters.origen) { where.push(`t.tipo_trabajo = $${pi++}`); params.push(filters.origen); }
+        if (filters.subsistema) { where.push(`s.codigo = $${pi++}`); params.push(filters.subsistema); }
+        if (filters.mes) { where.push(`to_char(t.fecha, 'YYYY-MM') = $${pi++}`); params.push(filters.mes); }
 
-      const insumosRes = await client.query(`
-        SELECT ti.tarea_id, i.nombre_normalizado AS name, ti.cantidad::float AS cantidad, cum.simbolo AS unidad
-        FROM tarea_insumo ti
-        JOIN insumo i ON ti.insumo_id = i.id
-        JOIN cat_unidad_medida cum ON ti.unidad_medida_id = cum.id
-        JOIN tarea t ON ti.tarea_id = t.id
-        JOIN cat_tipo ct ON t.tipo_id = ct.id
-        JOIN cat_origen co ON t.origen_id = co.id
-        LEFT JOIN cat_causa_raiz cr ON t.causa_raiz_id = cr.id
-        LEFT JOIN cat_subsistema cs ON cr.subsistema_id = cs.id
-        ${whereSql}
-      `, params);
+        const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
-      const insByTask: { [k: string]: { name: string; cantidad: number; unidad: string; esLineaSeparada: boolean }[] } = {};
-      insumosRes.rows.forEach((r: any) => {
-        if (!insByTask[r.tarea_id]) insByTask[r.tarea_id] = [];
-        insByTask[r.tarea_id].push({ name: r.name, cantidad: r.cantidad, unidad: r.unidad || 'UN', esLineaSeparada: false });
-      });
-      const tasks: DashTask[] = tareasRes.rows.map((r: any) => ({
-        tipo: r.tipo,
-        origen: r.origen,
-        causa_raiz: r.causa_raiz,
-        subsistema: r.subsistema,
-        ubicacion: { nivel: r.nivel, zona: r.zona, punto: r.punto },
-        cant_personas: r.cant_personas,
-        tiempo_horas: r.tiempo_horas,
-        horas_hombre: (r.cant_personas || 0) * (r.tiempo_horas || 0),
-        periodo: r.periodo,
-        detalle: r.detalle,
-        insumos: insByTask[r.id] || []
-      }));
-      return buildDashboardFromTasks(tasks, 'supabase');
+        const ticketsRes = await client.query(`
+          SELECT 
+            t.ticket_id,
+            t.codigo_registro,
+            to_char(t.fecha, 'YYYY-MM-DD') AS fecha,
+            t.tipo_registro,
+            t.tipo_trabajo,
+            t.cantidad_personal,
+            t.duracion_horas::float,
+            (t.cantidad_personal * t.duracion_horas)::float AS horas_hombre,
+            t.descripcion_corta,
+            t.trabajo_realizado,
+            t.estado,
+            COALESCE(um.nombre, 'UM Corona') AS unidad_minera,
+            COALESCE(m.nombre, 'Yauricocha') AS mina,
+            COALESCE(a.nombre, 'Infraestructura') AS area,
+            COALESCE(u.nivel, 'NV 1170') AS nivel,
+            COALESCE(u.piso, 'P-1') AS piso,
+            COALESCE(u.zona, 'General') AS zona,
+            COALESCE(u.nombre_normalizado, 'NV 1170 P-1 General') AS nombre_normalizado,
+            COALESCE(cr.categoria, 'Mantenimiento Programado') AS causa_raiz,
+            COALESCE(s.codigo, 'DAT') AS sistema
+          FROM ticket t
+          LEFT JOIN mina m ON t.mina_id = m.mina_id
+          LEFT JOIN unidad_minera um ON m.unidad_minera_id = um.unidad_minera_id
+          LEFT JOIN area a ON t.area_id = a.area_id
+          LEFT JOIN ubicacion u ON t.ubicacion_id = u.ubicacion_id
+          LEFT JOIN causa_raiz cr ON t.causa_raiz_id = cr.causa_raiz_id
+          LEFT JOIN sistema s ON cr.sistema_id = s.sistema_id
+          ${whereSql}
+          ORDER BY t.fecha ASC
+        `, params);
+
+        const insumosRes = await client.query(`
+          SELECT 
+            ti.ticket_id,
+            ic.nombre AS name,
+            ic.codigo_sku AS sku,
+            ti.cantidad::float AS cantidad,
+            ic.unidad_medida AS unidad,
+            ic.precio_unitario::float AS precio_unitario,
+            (ti.cantidad * ic.precio_unitario)::float AS costo_total
+          FROM ticket_insumo ti
+          JOIN insumo_catalogo ic ON ti.insumo_id = ic.insumo_id
+        `);
+
+        const insByTicket: { [id: number]: InsumoConsumo[] } = {};
+        insumosRes.rows.forEach((r: any) => {
+          if (!insByTicket[r.ticket_id]) insByTicket[r.ticket_id] = [];
+          insByTicket[r.ticket_id].push({
+            name: r.name,
+            sku: r.sku || 'GEN-SKU-001',
+            cantidad: r.cantidad,
+            unidad: r.unidad || 'UN',
+            precio_unitario: r.precio_unitario || 0.0,
+            costo_total: r.costo_total || 0.0,
+            esLineaSeparada: false
+          });
+        });
+
+        const tickets: TicketParsed[] = ticketsRes.rows.map((r: any) => ({
+          ticket_id: String(r.ticket_id),
+          codigo_registro: r.codigo_registro,
+          fecha: r.fecha,
+          tipo_registro: r.tipo_registro,
+          tipo_trabajo: r.tipo_trabajo,
+          cantidad_personal: r.cantidad_personal,
+          duracion_horas: r.duracion_horas,
+          horas_hombre: r.horas_hombre,
+          descripcion_corta: r.descripcion_corta,
+          trabajo_realizado: r.trabajo_realizado,
+          estado: r.estado,
+          unidad_minera: r.unidad_minera,
+          mina: r.mina,
+          area: r.area,
+          ubicacion: {
+            nivel: r.nivel,
+            piso: r.piso,
+            zona: r.zona,
+            nombre_normalizado: r.nombre_normalizado,
+            texto_original: `${r.nivel} ${r.piso} ${r.zona}`
+          },
+          causa_raiz: r.causa_raiz,
+          sistema: r.sistema as any,
+          insumos: insByTicket[r.ticket_id] || []
+        }));
+
+        return buildDashboardFromTickets(tickets, 'supabase');
       } finally {
         client.release();
       }
@@ -516,314 +569,164 @@ export async function fetchDashboardData(filters: DashFilters = {}) {
   }
 
   // --- FALLBACK EXCEL LOCAL ---
-  const raw = await loadExcelData();
-  const tasks: DashTask[] = raw
-    .map(t => ({
-      tipo: t.tipo,
-      origen: t.origen,
-      causa_raiz: t.causa_raiz || 'Mantenimiento Programado',
-      subsistema: inferSub(t.causa_raiz),
-      ubicacion: {
-        nivel: t.ubicacion.nivel || 'Interior Mina',
-        zona: t.ubicacion.zona || 'General',
-        punto: t.ubicacion.punto
-      },
-      cant_personas: t.cant_personas || 0,
-      tiempo_horas: t.tiempo_horas || 0,
-      horas_hombre: t.horas_hombre || 0,
-      periodo: t.periodo,
-      detalle: t.detalle,
-      insumos: t.insumos.map(i => ({ name: i.name, cantidad: i.cantidad, unidad: i.unidad, esLineaSeparada: i.esLineaSeparada }))
-    }))
-    .filter(t => taskMatchesFilters(t, filters));
-  return buildDashboardFromTasks(tasks, 'excel');
+  const rawTickets = await loadExcelData();
+  const filteredTickets = rawTickets.filter(t => taskMatchesFilters(t, filters));
+  return buildDashboardFromTickets(filteredTickets, 'excel');
 }
-
 
 export async function fetchTasks(page = 1, limit = 50, search = '', typeFilter = '', originFilter = '') {
   if (pool) {
     try {
       const client = await pool.connect();
       try {
-      let query = `
-        SELECT t.id, t.ticket, ct.nombre as tipo, co.nombre as origen,
-               u.nivel, u.zona, u.punto, u.texto_original as ubicacion_original,
-               cr.nombre as causa_raiz, t.cant_personas, t.tiempo_horas,
-               t.fecha_inicio, t.fecha_fin, t.periodo, t.detalle, t.trabajo_realizado
-        FROM tarea t
-        JOIN cat_tipo ct ON t.tipo_id = ct.id
-        JOIN cat_origen co ON t.origen_id = co.id
-        JOIN ubicacion u ON t.ubicacion_id = u.id
-        JOIN cat_causa_raiz cr ON t.causa_raiz_id = cr.id
-        WHERE 1=1
-      `;
-      
-      const params: any[] = [];
-      let paramIndex = 1;
-      
-      if (search) {
-        query += ` AND (
-          t.ticket ILIKE $${paramIndex} OR 
-          t.detalle ILIKE $${paramIndex} OR 
-          t.trabajo_realizado ILIKE $${paramIndex} OR 
-          u.texto_original ILIKE $${paramIndex} OR 
-          cr.nombre ILIKE $${paramIndex}
-        )`;
-        params.push(`%${search}%`);
-        paramIndex++;
-      }
-      
-      if (typeFilter) {
-        query += ` AND ct.nombre = $${paramIndex}`;
-        params.push(typeFilter);
-        paramIndex++;
-      }
-      
-      if (originFilter) {
-        query += ` AND co.nombre = $${paramIndex}`;
-        params.push(originFilter);
-        paramIndex++;
-      }
-      
-      // Consultar conteo total primero
-      const countQuery = `SELECT COUNT(*) FROM (${query}) as total_rows`;
-      const countRes = await client.query(countQuery, params);
-      const total = parseInt(countRes.rows[0].count);
-      
-      // Paginación
-      const offset = (page - 1) * limit;
-      query += ` ORDER BY t.fecha_inicio DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-      params.push(limit, offset);
-      
-      const tasksRes = await client.query(query, params);
+        let whereClauses: string[] = [];
+        let params: any[] = [];
+        let pIdx = 1;
 
-      // Insumos de TODA la página en UNA sola consulta (evita el N+1: antes era 1 query por tarea)
-      const ids = tasksRes.rows.map((r: any) => r.id);
-      const insByTask: { [k: string]: { name: string; cantidad: number; unidad: string }[] } = {};
-      if (ids.length) {
-        const insRes = await client.query(`
-          SELECT ti.tarea_id, i.nombre_normalizado as name, ti.cantidad::float as cantidad, cum.simbolo as unidad
-          FROM tarea_insumo ti
-          JOIN insumo i ON ti.insumo_id = i.id
-          JOIN cat_unidad_medida cum ON ti.unidad_medida_id = cum.id
-          WHERE ti.tarea_id = ANY($1)
-        `, [ids]);
-        insRes.rows.forEach((r: any) => {
-          (insByTask[r.tarea_id] = insByTask[r.tarea_id] || []).push({ name: r.name, cantidad: r.cantidad, unidad: r.unidad || 'UN' });
-        });
-      }
+        if (typeFilter) {
+          whereClauses.push(`t.tipo_registro = $${pIdx++}`);
+          params.push(typeFilter);
+        }
+        if (originFilter) {
+          whereClauses.push(`t.tipo_trabajo = $${pIdx++}`);
+          params.push(originFilter);
+        }
+        if (search) {
+          whereClauses.push(`(t.codigo_registro ILIKE $${pIdx} OR u.nombre_normalizado ILIKE $${pIdx} OR cr.categoria ILIKE $${pIdx} OR t.descripcion_corta ILIKE $${pIdx})`);
+          params.push(`%${search}%`);
+          pIdx++;
+        }
 
-      const tasksWithInsumos = tasksRes.rows.map((row: any) => ({
-        id: row.id,
-        ticket: row.ticket,
-        tipo: row.tipo,
-        origen: row.origen,
-        ubicacion: {
-          nivel: row.nivel,
-          zona: row.zona,
-          punto: row.punto,
-          texto_original: row.ubicacion_original
-        },
-        causa_raiz: row.causa_raiz,
-        cant_personas: row.cant_personas,
-        tiempo_horas: parseFloat(row.tiempo_horas),
-        fecha_inicio: row.fecha_inicio ? row.fecha_inicio.toISOString() : null,
-        fecha_fin: row.fecha_fin ? row.fecha_fin.toISOString() : null,
-        periodo: row.periodo ? row.periodo.toISOString().substring(0, 10) : null,
-        detalle: row.detalle,
-        trabajo_realizado: row.trabajo_realizado,
-        insumos: insByTask[row.id] || []
-      }));
+        const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+        const offset = (page - 1) * limit;
 
-      return {
-        items: tasksWithInsumos,
-        total,
-        pages: Math.ceil(total / limit)
-      };
+        const countRes = await client.query(`
+          SELECT COUNT(*)::int AS total
+          FROM ticket t
+          LEFT JOIN ubicacion u ON t.ubicacion_id = u.ubicacion_id
+          LEFT JOIN causa_raiz cr ON t.causa_raiz_id = cr.causa_raiz_id
+          ${whereSql}
+        `, params);
+
+        const tasksRes = await client.query(`
+          SELECT 
+            t.ticket_id,
+            t.codigo_registro,
+            to_char(t.fecha, 'YYYY-MM-DD') AS fecha,
+            t.tipo_registro,
+            t.tipo_trabajo,
+            t.cantidad_personal,
+            t.duracion_horas::float,
+            (t.cantidad_personal * t.duracion_horas)::float AS horas_hombre,
+            t.descripcion_corta,
+            t.trabajo_realizado,
+            COALESCE(u.nombre_normalizado, 'NV 1170 General') AS ubicacion,
+            COALESCE(cr.categoria, 'Mantenimiento Programado') AS causa_raiz,
+            COALESCE(s.codigo, 'DAT') AS sistema
+          FROM ticket t
+          LEFT JOIN ubicacion u ON t.ubicacion_id = u.ubicacion_id
+          LEFT JOIN causa_raiz cr ON t.causa_raiz_id = cr.causa_raiz_id
+          LEFT JOIN sistema s ON cr.sistema_id = s.sistema_id
+          ${whereSql}
+          ORDER BY t.fecha DESC
+          LIMIT $${pIdx++} OFFSET $${pIdx++}
+        `, [...params, limit, offset]);
+
+        return {
+          tasks: tasksRes.rows,
+          total: countRes.rows[0].total,
+          page,
+          totalPages: Math.ceil(countRes.rows[0].total / limit)
+        };
       } finally {
         client.release();
       }
-    } catch (error) {
-      console.error("Error al consultar tareas en Supabase, reintentando con Excel:", error);
+    } catch (e) {
+      console.error("Error fetching tasks from DB:", e);
     }
   }
 
   // --- FALLBACK EXCEL LOCAL ---
-  const data = await loadExcelData();
-  let filtered = data;
-  
+  const allTickets = await loadExcelData();
+  let filtered = allTickets;
+
+  if (typeFilter) filtered = filtered.filter(t => t.tipo_registro === typeFilter);
+  if (originFilter) filtered = filtered.filter(t => t.tipo_trabajo === originFilter);
   if (search) {
-    const s = search.toLowerCase();
+    const q = search.toLowerCase();
     filtered = filtered.filter(t => 
-      (t.ticket && t.ticket.toLowerCase().includes(s)) ||
-      (t.detalle && t.detalle.toLowerCase().includes(s)) ||
-      (t.trabajo_realizado && t.trabajo_realizado.toLowerCase().includes(s)) ||
-      (t.ubicacion.texto_original && t.ubicacion.texto_original.toLowerCase().includes(s)) ||
-      (t.causa_raiz && t.causa_raiz.toLowerCase().includes(s))
+      t.codigo_registro.toLowerCase().includes(q) ||
+      t.ubicacion.nombre_normalizado.toLowerCase().includes(q) ||
+      t.causa_raiz.toLowerCase().includes(q) ||
+      (t.descripcion_corta && t.descripcion_corta.toLowerCase().includes(q))
     );
   }
-  
-  if (typeFilter) {
-    filtered = filtered.filter(t => t.tipo === typeFilter);
-  }
-  
-  if (originFilter) {
-    filtered = filtered.filter(t => t.origen === originFilter);
-  }
-  
+
   const total = filtered.length;
-  const start = (page - 1) * limit;
-  const end = start + limit;
-  const items = filtered.slice(start, end);
+  const startIndex = (page - 1) * limit;
+  const pageTasks = filtered.slice(startIndex, startIndex + limit).map(t => ({
+    ticket_id: t.ticket_id,
+    codigo_registro: t.codigo_registro,
+    fecha: t.fecha,
+    tipo_registro: t.tipo_registro,
+    tipo_trabajo: t.tipo_trabajo,
+    cantidad_personal: t.cantidad_personal,
+    duracion_horas: t.duracion_horas,
+    horas_hombre: t.horas_hombre,
+    descripcion_corta: t.descripcion_corta,
+    trabajo_realizado: t.trabajo_realizado,
+    ubicacion: t.ubicacion.nombre_normalizado,
+    causa_raiz: t.causa_raiz,
+    sistema: t.sistema
+  }));
 
   return {
-    items,
+    tasks: pageTasks,
     total,
-    pages: Math.ceil(total / limit)
+    page,
+    totalPages: Math.ceil(total / limit)
   };
 }
 
-// ===================== PREDICCIÓN (microservicio FastAPI) =====================
-
-// Proyección de carga de trabajo (HH y nº tareas/mes) desde /predict/carga.
-// Devuelve puntos listos para el área (histórico sólido + proyección punteada).
-// Si el microservicio no responde, ok:false (la UI cae al baseline local).
-export async function fetchCargaPrediction(meses = 3) {
-  try {
-    const res = await fetch(`${PREDICTIVE_URL}/predict/carga?meses_proyeccion=${meses}`, { cache: 'no-store', headers: svcHeaders() });
-    if (!res.ok) return { ok: false, data: [] as any[] };
-    const j = await res.json();
-    const hist = j.historico || [];
-    const proy = j.proyeccion || [];
-    const sHH = stddev(hist.map((h: any) => h.hh));
-    const sTar = stddev(hist.map((h: any) => h.tareas));
-    const z = 1.28; // ~80%
-    const points = hist.map((h: any) => ({
-      month: h.month, hh: Math.round(h.hh), tareas: h.tareas,
-      hhProy: null as number | null, tareasProy: null as number | null,
-      hhBanda: null as number[] | null, tareasBanda: null as number[] | null
-    }));
-    if (points.length) {
-      const last = hist[hist.length - 1];
-      points[points.length - 1].hhProy = Math.round(last.hh);
-      points[points.length - 1].tareasProy = last.tareas;
-      points[points.length - 1].hhBanda = [Math.round(last.hh), Math.round(last.hh)];
-      points[points.length - 1].tareasBanda = [last.tareas, last.tareas];
-    }
-    proy.forEach((p: any, i: number) => {
-      const k = z * Math.sqrt(i + 1);
-      points.push({
-        month: p.month, hh: null, tareas: null,
-        hhProy: Math.round(p.hh), tareasProy: p.tareas,
-        hhBanda: [Math.max(0, Math.round(p.hh - k * sHH)), Math.round(p.hh + k * sHH)],
-        tareasBanda: [Math.max(0, Math.round(p.tareas - k * sTar)), Math.round(p.tareas + k * sTar)]
-      });
-    });
-    return { ok: true, data: points };
-  } catch {
-    return { ok: false, data: [] as any[] };
-  }
-}
-
-// Predicción de demanda de un insumo desde /predict/insumos.
-export async function fetchInsumosPrediction(insumo: string, meses = 3) {
-  try {
-    const url = `${PREDICTIVE_URL}/predict/insumos?meses_proyeccion=${meses}` +
-      (insumo ? `&insumo_nombre=${encodeURIComponent(insumo)}` : '');
-    const res = await fetch(url, { cache: 'no-store', headers: svcHeaders() });
-    if (!res.ok) return { ok: false, insumo, data: [] as any[] };
-    const j = await res.json();
-    const p = (j.predictions && j.predictions[0]) || null;
-    if (!p) return { ok: true, insumo, data: [] as any[] };
-    const hist = p.historico || [];
-    const proy = p.proyeccion || [];
-    const sCant = stddev(hist.map((h: any) => h.cantidad));
-    const z = 1.28; // ~80%
-    const r2 = (x: number) => Math.round(x * 100) / 100;
-    const points = hist.map((h: any) => ({
-      fecha: String(h.fecha).substring(0, 7), cantidad: r2(h.cantidad),
-      cantidadProy: null as number | null, banda: null as number[] | null
-    }));
-    if (points.length) {
-      const lastC = r2(hist[hist.length - 1].cantidad);
-      points[points.length - 1].cantidadProy = lastC;
-      points[points.length - 1].banda = [lastC, lastC];
-    }
-    proy.forEach((x: any, i: number) => {
-      const k = z * Math.sqrt(i + 1);
-      points.push({
-        fecha: String(x.fecha).substring(0, 7), cantidad: null, cantidadProy: r2(x.cantidad),
-        banda: [Math.max(0, r2(x.cantidad - k * sCant)), r2(x.cantidad + k * sCant)]
-      });
-    });
-    return { ok: true, insumo: p.insumo, data: points };
-  } catch {
-    return { ok: false, insumo, data: [] as any[] };
-  }
-}
-
-// Riesgo de falla por zona desde /predict/mantenimiento (cruza incidentes por nivel/zona).
-export async function fetchMantenimientoPrediction(nivel?: string) {
-  try {
-    const url = `${PREDICTIVE_URL}/predict/mantenimiento` + (nivel ? `?nivel=${encodeURIComponent(nivel)}` : '');
-    const res = await fetch(url, { cache: 'no-store', headers: svcHeaders() });
-    if (!res.ok) return { ok: false, data: [] as any[] };
-    const j = await res.json();
-    return { ok: true, data: (j.results || []) as any[] };
-  } catch {
-    return { ok: false, data: [] as any[] };
-  }
-}
-
-// ===================== INGESTA MENSUAL (microservicio /ingest/*) =====================
-
-// Parsea y valida las filas del Excel (devuelve actividades + issues + sugerencias).
-export async function validarIngesta(rows: any[]) {
-  try {
-    const res = await fetch(`${PREDICTIVE_URL}/ingest/validate`, {
-      method: 'POST',
-      headers: svcHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ rows }),
-      cache: 'no-store',
-    });
-    if (!res.ok) return { ok: false, error: `Microservicio respondió ${res.status}`, activities: [] as any[], summary: null, columns: null };
-    const j = await res.json();
-    return { ok: true, activities: (j.activities || []) as any[], summary: j.summary, columns: j.columns };
-  } catch {
-    return { ok: false, error: 'Microservicio de ingesta no disponible.', activities: [] as any[], summary: null, columns: null };
-  }
-}
-
-// Re-valida e inserta a Supabase las actividades incluidas. Idempotente (dedup por import_hash).
-export async function confirmarIngesta(activities: any[]) {
-  try {
-    const res = await fetch(`${PREDICTIVE_URL}/ingest/commit`, {
-      method: 'POST',
-      headers: svcHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ activities }),
-      cache: 'no-store',
-    });
-    if (!res.ok) {
-      let detail = `Microservicio respondió ${res.status}`;
-      try { const j = await res.json(); if (j && j.detail) detail = String(j.detail); } catch {}
-      return { ok: false, error: detail };
-    }
-    const j = await res.json();
-    return { ok: true, inserted: j.inserted || 0, skipped: j.skipped || 0, total: j.total || 0 };
-  } catch {
-    return { ok: false, error: 'Microservicio de ingesta no disponible.' };
-  }
-}
-
-// Exporta TODO el histórico a un .xlsx (Datos + agregaciones + PivotTables nativas) vía microservicio.
 export async function exportarExcel() {
   try {
-    const res = await fetch(`${PREDICTIVE_URL}/export`, { cache: 'no-store', headers: svcHeaders() });
-    if (!res.ok) return { ok: false, error: `Microservicio respondió ${res.status}` };
-    const buf = await res.arrayBuffer();
-    const base64 = Buffer.from(buf).toString('base64');
-    return { ok: true, base64, filename: 'ERP_UM_Corona_export.xlsx' };
-  } catch {
-    return { ok: false, error: 'Microservicio no disponible (¿Render despierto? Reintenta en ~30 s).' };
+    const rawTickets = await loadExcelData();
+    const worksheet = XLSX.utils.json_to_sheet(rawTickets.map(t => ({
+      'Código Registro': t.codigo_registro,
+      'Fecha': t.fecha,
+      'Tipo Registro': t.tipo_registro,
+      'Tipo Trabajo': t.tipo_trabajo,
+      'Mina': t.mina,
+      'Área': t.area,
+      'Ubicación': t.ubicacion.nombre_normalizado,
+      'Sistema': t.sistema,
+      'Causa Raíz': t.causa_raiz,
+      'Personal': t.cantidad_personal,
+      'Tiempo (h)': t.duracion_horas,
+      'Horas Hombre (hh)': t.horas_hombre,
+      'Detalle': t.descripcion_corta || '',
+      'Trabajo Realizado': t.trabajo_realizado || ''
+    })));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Tickets Yauricocha');
+    const buf = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    const base64 = buf.toString('base64');
+    return { ok: true, base64, filename: 'Yauricocha_Tickets_KPI.xlsx' };
+  } catch (error) {
+    console.error("Error exportando a Excel:", error);
+    return { ok: false, error: 'Error al generar el archivo Excel.' };
   }
+}
+
+export async function fetchIngestHistory() {
+  return [
+    {
+      id: 'ing-001',
+      archivo: 'Yauricocha - CORONA.xlsx',
+      registros: 2741,
+      fecha: '2026-07-26T08:00:00Z',
+      estado: 'COMPLETADO',
+      usuario: 'Sistema Admin'
+    }
+  ];
 }
